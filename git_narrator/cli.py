@@ -201,23 +201,27 @@ def run_analysis_pipeline(
         sys.exit(1)
 
     # 1. Resolve Git Scope
-    scope = detect_change_scope(target_ref)
-    if scope.scope_type == "empty":
-        console.print("[yellow]Working tree clean, no modified files or commits to analyze.[/yellow]")
-        sys.exit(0)
+    if target_ref:
+        target = target_ref
+    else:
+        scope = detect_change_scope(".")
+        if scope.scope_type == "empty":
+            console.print("[yellow]Working tree clean, no modified files or commits to analyze.[/yellow]")
+            sys.exit(0)
+        target = scope.target or scope.scope_type
 
     # 2. Extract Git Stats & Diff
-    raw_diff = get_diff(scope.target or scope.scope_type)
-    diff_stat = get_stat(scope.target or scope.scope_type)
-    numstats = get_numstat(scope.target or scope.scope_type)
-    branch = get_current_branch() or "HEAD"
+    raw_diff = get_diff(".", target=target)
+    diff_stat = get_stat(".", target=target)
+    numstats = get_numstat(".", target=target)
+    branch = get_current_branch(".") or "HEAD"
 
     # 3. Sanitize and Compact Lockfiles
     sanitized = sanitize_diff(raw_diff)
-    cleaned_diff, dep_summary = strip_lockfiles_and_inject_summary(sanitized.clean_diff)
+    cleaned_diff, dep_summary, _ = strip_lockfiles_and_inject_summary(sanitized.cleaned_diff)
 
     # 4. Knapsack Token Optimization
-    knapsack = optimize_diff_tokens(cleaned_diff, max_tokens=14000)
+    knapsack = optimize_diff_tokens(cleaned_diff, token_budget=14000)
     final_diff = knapsack.optimized_diff
 
     # 5. Resolve AI Provider
@@ -229,10 +233,10 @@ def run_analysis_pipeline(
 
     schema = get_report_json_schema()
     prompt = build_narrator_prompt(
-        sanitized_diff=final_diff,
-        git_diff_stat=diff_stat,
-        dependency_deltas=dep_summary,
-        branch_name=branch,
+        diff=final_diff,
+        stat=diff_stat,
+        lockfile_mutations=dep_summary,
+        branch_info=branch,
     )
 
     # Instantiate Provider Driver
@@ -338,9 +342,9 @@ def run_narrator_flow(
         override_provider=override_provider,
         override_model=override_model,
     )
-    branch = get_current_branch() or "HEAD"
-    scope = detect_change_scope(target_ref)
-    stat = get_stat(scope.target or scope.scope_type)
+    branch = get_current_branch(".") or "HEAD"
+    target = target_ref or (detect_change_scope(".").target or detect_change_scope(".").scope_type)
+    stat = get_stat(".", target=target)
     short_stat = stat.strip().splitlines()[-1] if stat.strip() else "changes detected"
 
     current_tab = 1
