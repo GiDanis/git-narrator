@@ -249,7 +249,7 @@ Or set standard environment variables:
 
 Contributions are welcome!
 ```bash
-git clone https://github.com/giuseppe/git-narrator.git
+git clone https://github.com/GiDanis/git-narrator.git
 cd git-narrator
 uv sync
 uv run pytest

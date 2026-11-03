@@ -41,6 +41,11 @@ dependencies = [
 git-narrator = "git_narrator.cli:main"
 narrator = "git_narrator.cli:main"
 
+[project.urls]
+Homepage = "https://github.com/GiDanis/git-narrator"
+Repository = "https://github.com/GiDanis/git-narrator"
+Issues = "https://github.com/GiDanis/git-narrator/issues"
+
 [dependency-groups]
 dev = [
     "pytest>=8.0.0",
