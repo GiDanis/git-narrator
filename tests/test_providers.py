@@ -1,8 +1,9 @@
 """Unit tests for git_narrator LLM providers with mock HTTP transports."""
 
 import json
-import pytest
+
 import httpx
+import pytest
 
 from git_narrator.providers import (
     AnthropicProvider,
@@ -74,7 +75,7 @@ async def test_ollama_provider_stream_and_payload():
         half = len(report_json) // 2
         part1 = json.dumps({"message": {"content": report_json[:half]}, "done": False})
         part2 = json.dumps({"message": {"content": report_json[half:]}, "done": True})
-        content = f"{part1}\n{part2}\n".encode("utf-8")
+        content = f"{part1}\n{part2}\n".encode()
         return httpx.Response(200, content=content)
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(mock_handler))
@@ -117,7 +118,7 @@ async def test_gemini_provider_stream_and_payload():
         report_json = json.dumps(MOCK_REPORT)
         sse_body = (
             f'data: {{"candidates": [{{"content": {{"parts": [{{"text": {json.dumps(report_json)}}}]}}}}]}}\n\n'
-        ).encode("utf-8")
+        ).encode()
         return httpx.Response(200, content=sse_body)
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(mock_handler))
@@ -157,7 +158,7 @@ async def test_openai_provider_stream_and_payload():
         report_json = json.dumps(MOCK_REPORT)
         chunk1 = json.dumps({"choices": [{"delta": {"content": report_json[:50]}}]})
         chunk2 = json.dumps({"choices": [{"delta": {"content": report_json[50:]}}]})
-        sse_body = f"data: {chunk1}\n\ndata: {chunk2}\n\ndata: [DONE]\n\n".encode("utf-8")
+        sse_body = f"data: {chunk1}\n\ndata: {chunk2}\n\ndata: [DONE]\n\n".encode()
         return httpx.Response(200, content=sse_body)
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(mock_handler))
@@ -204,7 +205,7 @@ async def test_anthropic_provider_stream_and_payload():
                 "partial_json": report_json,
             },
         }
-        sse_body = f"data: {json.dumps(delta_event)}\n\n".encode("utf-8")
+        sse_body = f"data: {json.dumps(delta_event)}\n\n".encode()
         return httpx.Response(200, content=sse_body)
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(mock_handler))

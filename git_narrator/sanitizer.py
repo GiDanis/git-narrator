@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
+import fnmatch
+import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import Enum
-import fnmatch
-import os
 from pathlib import Path
-import re
-from typing import Optional, Sequence
 
 # Known binary extensions to prune immediately
 BINARY_EXTENSIONS = {
@@ -149,8 +148,7 @@ class SanitizedDiffResult:
 def _normalize_path(path: str | Path) -> str:
     """Normalize path into unix-style relative path without leading /."""
     p_str = str(path).replace("\\", "/")
-    if p_str.startswith("./"):
-        p_str = p_str[2:]
+    p_str = p_str.removeprefix("./")
     return p_str.lstrip("/")
 
 
@@ -287,7 +285,7 @@ class GitIgnorePattern:
 class IgnoreMatcher:
     """Gitignore-style glob pattern matcher with default rules."""
 
-    def __init__(self, patterns: Optional[Sequence[str]] = None):
+    def __init__(self, patterns: Sequence[str] | None = None):
         self.rules: list[GitIgnorePattern] = []
         # Add default patterns first
         for pat in DEFAULT_IGNORE_PATTERNS:
@@ -373,7 +371,7 @@ def parse_gitattributes(repo_root: Path | str) -> dict[str, dict[str, str]]:
     return mapping
 
 
-def is_ignored_path(path: str | Path, ignore_patterns: Optional[Sequence[str]] = None) -> bool:
+def is_ignored_path(path: str | Path, ignore_patterns: Sequence[str] | None = None) -> bool:
     """Check if path is matched by custom or default ignore rules."""
     matcher = IgnoreMatcher(ignore_patterns)
     return matcher.is_ignored(path)
@@ -382,7 +380,7 @@ def is_ignored_path(path: str | Path, ignore_patterns: Optional[Sequence[str]] =
 def is_generated_content(
     file_path: str | Path,
     content_or_diff: str,
-    gitattributes: Optional[dict[str, dict[str, str]]] = None,
+    gitattributes: dict[str, dict[str, str]] | None = None,
 ) -> bool:
     """Detect if file is generated via .gitattributes or code header markers.
 
@@ -422,7 +420,7 @@ class FileDiffChunk:
     """Extracted file diff segment with file headers."""
 
     file_path: str
-    old_path: Optional[str]
+    old_path: str | None
     raw_chunk: str
     is_binary: bool = False
 
@@ -482,8 +480,8 @@ def split_diff_into_file_chunks(diff_text: str) -> list[FileDiffChunk]:
 
 def sanitize_diff(
     diff_text: str,
-    repo_root: Optional[Path | str] = None,
-    custom_ignore_patterns: Optional[Sequence[str]] = None,
+    repo_root: Path | str | None = None,
+    custom_ignore_patterns: Sequence[str] | None = None,
 ) -> SanitizedDiffResult:
     """Sanitize unified diff by applying tiered pruning.
 

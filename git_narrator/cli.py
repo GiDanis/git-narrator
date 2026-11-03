@@ -2,7 +2,7 @@
 
 import os
 import sys
-from typing import Optional
+
 import click
 
 
@@ -18,10 +18,10 @@ import click
 def cli(
     ctx: click.Context,
     local: bool,
-    provider: Optional[str],
-    model: Optional[str],
+    provider: str | None,
+    model: str | None,
     output_format: str,
-    fail_on_risk: Optional[str],
+    fail_on_risk: str | None,
     copy: bool,
 ) -> None:
     """Understand any git diff in 5 seconds.
@@ -50,12 +50,12 @@ def cli(
 @click.option("--fail-on-risk", type=click.Choice(["CRITICAL", "HIGH", "MEDIUM", "LOW"]))
 @click.option("--copy", "-c", is_flag=True, help="Copy to clipboard automatically.")
 def diff_cmd(
-    ref: Optional[str],
+    ref: str | None,
     local: bool,
-    provider: Optional[str],
-    model: Optional[str],
+    provider: str | None,
+    model: str | None,
     output_format: str,
-    fail_on_risk: Optional[str],
+    fail_on_risk: str | None,
     copy: bool,
 ) -> None:
     """Analyze a specific git commit, range, or branch diff (e.g. HEAD~1, main..feature)."""
@@ -75,12 +75,13 @@ def diff_cmd(
 @click.option("--provider", "-p", help="Override AI provider.")
 @click.option("--model", "-m", help="Override AI model name.")
 @click.option("--yes", "-y", is_flag=True, help="Automatically commit without interactive confirmation.")
-def commit_cmd(local: bool, provider: Optional[str], model: Optional[str], yes: bool) -> None:
+def commit_cmd(local: bool, provider: str | None, model: str | None, yes: bool) -> None:
     """Generate a Conventional Commit message and commit staged changes immediately."""
-    from git_narrator.git_engine import is_git_repo, detect_change_scope, run_git
-    from git_narrator.clipboard import copy_to_clipboard
     from rich.console import Console
     from rich.prompt import Confirm
+
+    from git_narrator.clipboard import copy_to_clipboard
+    from git_narrator.git_engine import detect_change_scope, is_git_repo, run_git
 
     console = Console()
     if not is_git_repo():
@@ -120,11 +121,12 @@ def commit_cmd(local: bool, provider: Optional[str], model: Optional[str], yes: 
 @click.option("--local", "-l", is_flag=True, help="Force local Ollama model.")
 @click.option("--provider", "-p", help="Override AI provider.")
 @click.option("--model", "-m", help="Override AI model name.")
-def pr_cmd(ref: Optional[str], local: bool, provider: Optional[str], model: Optional[str]) -> None:
+def pr_cmd(ref: str | None, local: bool, provider: str | None, model: str | None) -> None:
     """Generate a complete GitHub Pull Request description in Markdown and copy to clipboard."""
-    from git_narrator.ui import generate_pr_markdown
-    from git_narrator.clipboard import copy_to_clipboard
     from rich.console import Console
+
+    from git_narrator.clipboard import copy_to_clipboard
+    from git_narrator.ui import generate_pr_markdown
 
     console = Console()
     report = run_analysis_pipeline(
@@ -143,9 +145,14 @@ def pr_cmd(ref: Optional[str], local: bool, provider: Optional[str], model: Opti
 @cli.command("config")
 def config_cmd() -> None:
     """Display and configure active AI providers and preferences."""
-    from git_narrator.config import resolve_provider_and_model, load_config, save_global_config, is_ollama_reachable
     from rich.console import Console
     from rich.table import Table
+
+    from git_narrator.config import (
+        is_ollama_reachable,
+        load_config,
+        resolve_provider_and_model,
+    )
 
     console = Console()
     config = load_config()
@@ -167,33 +174,35 @@ def config_cmd() -> None:
 
 
 def run_analysis_pipeline(
-    target_ref: Optional[str],
+    target_ref: str | None,
     forced_local: bool = False,
-    override_provider: Optional[str] = None,
-    override_model: Optional[str] = None,
+    override_provider: str | None = None,
+    override_model: str | None = None,
 ):
     """Executes the complete git diff inspection, compaction, and AI generation pipeline."""
     import asyncio
+
     from rich.console import Console
-    from git_narrator.git_engine import (
-        is_git_repo,
-        detect_change_scope,
-        get_diff,
-        get_stat,
-        get_numstat,
-        get_current_branch,
-    )
-    from git_narrator.sanitizer import sanitize_diff
-    from git_narrator.lockfile import strip_lockfiles_and_inject_summary
-    from git_narrator.knapsack import optimize_diff_tokens
+
     from git_narrator.config import resolve_provider_and_model
-    from git_narrator.prompts import build_narrator_prompt, SYSTEM_PROMPT
-    from git_narrator.schemas import get_report_json_schema, GitNarratorReport
+    from git_narrator.git_engine import (
+        detect_change_scope,
+        get_current_branch,
+        get_diff,
+        get_numstat,
+        get_stat,
+        is_git_repo,
+    )
+    from git_narrator.knapsack import optimize_diff_tokens
+    from git_narrator.lockfile import strip_lockfiles_and_inject_summary
     from git_narrator.parser import parse_and_validate_report
-    from git_narrator.providers.ollama import OllamaProvider
-    from git_narrator.providers.gemini import GeminiProvider
-    from git_narrator.providers.openai import OpenAIProvider
+    from git_narrator.prompts import SYSTEM_PROMPT, build_narrator_prompt
     from git_narrator.providers.anthropic import AnthropicProvider
+    from git_narrator.providers.gemini import GeminiProvider
+    from git_narrator.providers.ollama import OllamaProvider
+    from git_narrator.providers.openai import OpenAIProvider
+    from git_narrator.sanitizer import sanitize_diff
+    from git_narrator.schemas import get_report_json_schema
 
     console = Console()
     if not is_git_repo():
@@ -283,30 +292,34 @@ def run_analysis_pipeline(
 
 
 def run_narrator_flow(
-    target_ref: Optional[str],
+    target_ref: str | None,
     forced_local: bool,
-    override_provider: Optional[str],
-    override_model: Optional[str],
+    override_provider: str | None,
+    override_model: str | None,
     output_format: str,
-    fail_on_risk: Optional[str],
+    fail_on_risk: str | None,
     auto_copy: bool,
 ) -> None:
     """Orchestrates analysis and handles interactive dashboard or formatted outputs."""
-    import json
     from rich.console import Console
-    from git_narrator.git_engine import get_current_branch, get_stat, detect_change_scope
-    from git_narrator.config import resolve_provider_and_model
-    from git_narrator.ui import (
-        render_header,
-        render_story_tab,
-        render_risk_tab,
-        render_diagram_tab,
-        render_commit_tab,
-        render_footer,
-        generate_pr_markdown,
-    )
+
     from git_narrator.clipboard import copy_to_clipboard
+    from git_narrator.config import resolve_provider_and_model
+    from git_narrator.git_engine import (
+        detect_change_scope,
+        get_current_branch,
+        get_stat,
+    )
     from git_narrator.keyboard import get_single_key
+    from git_narrator.ui import (
+        generate_pr_markdown,
+        render_commit_tab,
+        render_diagram_tab,
+        render_footer,
+        render_header,
+        render_risk_tab,
+        render_story_tab,
+    )
 
     console = Console()
     report = run_analysis_pipeline(

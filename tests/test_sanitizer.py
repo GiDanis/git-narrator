@@ -1,7 +1,6 @@
 """Tests for sanitizer module: tiered pruning of binary, minified, build, and generated code."""
 
 from pathlib import Path
-import pytest
 
 from git_narrator.sanitizer import (
     IgnoreMatcher,
@@ -9,11 +8,8 @@ from git_narrator.sanitizer import (
     is_binary_path,
     is_build_dir_path,
     is_generated_content,
-    is_ignored_path,
     is_minified_content,
     is_minified_path,
-    load_narratorignore,
-    parse_gitattributes,
     sanitize_diff,
     split_diff_into_file_chunks,
 )

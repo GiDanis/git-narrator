@@ -1,7 +1,7 @@
 """Prompt templates and builder functions for git-narrator."""
 
 import json
-from typing import Optional
+
 from git_narrator.schemas import GitNarratorReport
 
 SYSTEM_PROMPT = """You are git-narrator, an elite Principal Software Architect and Chief Security Auditor.

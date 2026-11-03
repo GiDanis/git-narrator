@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from enum import Enum
-from pathlib import Path
 import re
-from typing import Literal, Optional, Sequence
+from collections.abc import Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Literal
 
 from git_narrator.sanitizer import split_diff_into_file_chunks
 
@@ -29,8 +29,8 @@ class DependencyChange:
 
     name: str
     change_type: ChangeType
-    old_version: Optional[str]
-    new_version: Optional[str]
+    old_version: str | None
+    new_version: str | None
     file: str
     manager: str
 
@@ -204,9 +204,9 @@ def _parse_toml_lock_diff(diff_content: str, file_path: str, manager: str) -> li
     added_packages: dict[str, str] = {}
 
     # State machine for diff blocks
-    current_name: Optional[str] = None
-    old_ver: Optional[str] = None
-    new_ver: Optional[str] = None
+    current_name: str | None = None
+    old_ver: str | None = None
+    new_ver: str | None = None
 
     def commit_package():
         nonlocal current_name, old_ver, new_ver
@@ -313,7 +313,7 @@ def _parse_npm_diff(diff_content: str, file_path: str) -> list[DependencyChange]
     ver_regex = re.compile(r'^\s*([+-])\s*"version":\s*"([^"]+)"')
     simple_dep_regex = re.compile(r'^\s*([+-])\s*"([@a-zA-Z0-9_\-\./]+)":\s*"([^"]+)"')
 
-    current_pkg: Optional[str] = None
+    current_pkg: str | None = None
 
     for line in lines:
         if line.startswith("---") or line.startswith("+++"):
@@ -402,7 +402,7 @@ def _parse_yarn_diff(diff_content: str, file_path: str) -> list[DependencyChange
 
     removed: dict[str, str] = {}
     added: dict[str, str] = {}
-    current_pkg: Optional[str] = None
+    current_pkg: str | None = None
 
     for line in lines:
         h_match = header_regex.match(line)

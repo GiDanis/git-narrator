@@ -1,6 +1,7 @@
 """Tests for git-narrator CLI entrypoint and commands."""
 
 from click.testing import CliRunner
+
 from git_narrator.cli import cli
 
 

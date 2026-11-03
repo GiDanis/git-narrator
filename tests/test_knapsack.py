@@ -1,18 +1,14 @@
 """Tests for knapsack module: semantic priority scoring and token budget allocation."""
 
 import math
-import pytest
 
 from git_narrator.knapsack import (
-    DiffFile,
     DiffHunk,
-    KnapsackBudgetOptimizer,
     classify_file_weight,
     compress_hunk_context,
     estimate_tokens,
     has_interface_signature,
     optimize_diff_tokens,
-    parse_diff_files,
     score_hunk,
 )
 

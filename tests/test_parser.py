@@ -1,7 +1,7 @@
 """Unit tests for git_narrator 5-tier fallback parser and auto-repair engine."""
 
 import json
-import pytest
+
 from git_narrator.parser import (
     extract_balanced_braces,
     extract_code_fences,

@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import math
-from pathlib import Path
 import re
-from typing import Optional, Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
 
 from git_narrator.sanitizer import split_diff_into_file_chunks
 
@@ -253,8 +252,8 @@ def compress_hunk_context(hunk: DiffHunk) -> DiffHunk:
 
     lines = hunk.lines
     # Find first and last change lines
-    first_edit_idx: Optional[int] = None
-    last_edit_idx: Optional[int] = None
+    first_edit_idx: int | None = None
+    last_edit_idx: int | None = None
 
     for idx, line in enumerate(lines):
         if line.startswith(("+", "-")):
@@ -321,7 +320,7 @@ def parse_diff_files(diff_text: str) -> list[DiffFile]:
         headers: list[str] = []
         hunks: list[DiffHunk] = []
 
-        current_hunk_header: Optional[str] = None
+        current_hunk_header: str | None = None
         current_hunk_lines: list[str] = []
 
         def finish_hunk():

@@ -1,10 +1,8 @@
 """Tests for lockfile module: delta compaction for npm, cargo, poetry, uv, yarn, pnpm, and pip."""
 
-import pytest
 
 from git_narrator.lockfile import (
     compact_lockfile_diff,
-    format_lockfile_summary,
     is_lockfile,
     strip_lockfiles_and_inject_summary,
 )

@@ -1,7 +1,9 @@
 """Google Gemini LLM provider driver using v1beta streaming API."""
 
 import json
-from typing import Any, AsyncIterator, Optional, Type
+from collections.abc import AsyncIterator
+from typing import Any
+
 import httpx
 from pydantic import BaseModel
 
@@ -44,10 +46,10 @@ class GeminiProvider(BaseLLMProvider):
     def __init__(
         self,
         model: str = "gemini-1.5-flash",
-        api_key: Optional[str] = None,
-        base_url: Optional[str] = "https://generativelanguage.googleapis.com",
+        api_key: str | None = None,
+        base_url: str | None = "https://generativelanguage.googleapis.com",
         timeout: float = 90.0,
-        client: Optional[httpx.AsyncClient] = None,
+        client: httpx.AsyncClient | None = None,
     ):
         super().__init__(
             model=model,
@@ -86,7 +88,7 @@ class GeminiProvider(BaseLLMProvider):
         self,
         system_prompt: str,
         user_prompt: str,
-        json_schema: dict[str, Any] | Type[BaseModel] | None = None,
+        json_schema: dict[str, Any] | type[BaseModel] | None = None,
     ) -> AsyncIterator[str]:
         """Stream structured JSON chunks from Gemini via SSE."""
         target_schema = resolve_schema_dict(json_schema)

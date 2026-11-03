@@ -1,7 +1,9 @@
 """OpenAI-compatible LLM provider driver (OpenAI, Groq, DeepSeek, OpenRouter, vLLM)."""
 
 import json
-from typing import Any, AsyncIterator, Optional, Type
+from collections.abc import AsyncIterator
+from typing import Any
+
 import httpx
 from pydantic import BaseModel
 
@@ -15,12 +17,12 @@ class OpenAIProvider(BaseLLMProvider):
     def __init__(
         self,
         model: str = "gpt-4o",
-        api_key: Optional[str] = None,
-        base_url: Optional[str] = "https://api.openai.com/v1",
+        api_key: str | None = None,
+        base_url: str | None = "https://api.openai.com/v1",
         timeout: float = 90.0,
         strict_schema: bool = True,
         use_json_object: bool = False,
-        client: Optional[httpx.AsyncClient] = None,
+        client: httpx.AsyncClient | None = None,
     ):
         super().__init__(
             model=model,
@@ -66,7 +68,7 @@ class OpenAIProvider(BaseLLMProvider):
         self,
         system_prompt: str,
         user_prompt: str,
-        json_schema: dict[str, Any] | Type[BaseModel] | None = None,
+        json_schema: dict[str, Any] | type[BaseModel] | None = None,
     ) -> AsyncIterator[str]:
         """Stream structured JSON response chunks via SSE."""
         target_schema = resolve_schema_dict(json_schema)

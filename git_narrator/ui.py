@@ -1,12 +1,12 @@
 """Rich TUI interface and interactive visual renderer for git-narrator."""
 
-from typing import Any, Dict, List, Optional
+from typing import Any
+
 from rich.console import Console, Group
 from rich.panel import Panel
+from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
-from rich.syntax import Syntax
-
 
 console = Console()
 

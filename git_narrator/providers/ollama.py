@@ -1,7 +1,9 @@
 """Local Ollama LLM provider driver."""
 
 import json
-from typing import Any, AsyncIterator, Optional, Type
+from collections.abc import AsyncIterator
+from typing import Any
+
 import httpx
 from pydantic import BaseModel
 
@@ -15,9 +17,9 @@ class OllamaProvider(BaseLLMProvider):
     def __init__(
         self,
         model: str = "llama3.2",
-        base_url: Optional[str] = "http://localhost:11434",
+        base_url: str | None = "http://localhost:11434",
         timeout: float = 120.0,
-        client: Optional[httpx.AsyncClient] = None,
+        client: httpx.AsyncClient | None = None,
     ):
         super().__init__(
             model=model,
@@ -48,7 +50,7 @@ class OllamaProvider(BaseLLMProvider):
         self,
         system_prompt: str,
         user_prompt: str,
-        json_schema: dict[str, Any] | Type[BaseModel] | None = None,
+        json_schema: dict[str, Any] | type[BaseModel] | None = None,
     ) -> AsyncIterator[str]:
         """Stream structured JSON response chunks from Ollama."""
         target_schema = resolve_schema_dict(json_schema)

@@ -1,7 +1,9 @@
 """Abstract base class and utilities for LLM provider drivers."""
 
 from abc import ABC, abstractmethod
-from typing import Any, AsyncIterator, Optional, Type
+from collections.abc import AsyncIterator
+from typing import Any
+
 import httpx
 from pydantic import BaseModel
 
@@ -11,7 +13,7 @@ from git_narrator.transport import create_http_client
 
 
 def resolve_schema_dict(
-    schema: dict[str, Any] | Type[BaseModel] | None,
+    schema: dict[str, Any] | type[BaseModel] | None,
 ) -> dict[str, Any]:
     """Resolve user schema argument into a JSON schema dictionary."""
     if schema is None:
@@ -29,17 +31,17 @@ class BaseLLMProvider(ABC):
     def __init__(
         self,
         model: str,
-        api_key: Optional[str] = None,
-        base_url: Optional[str] = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
         timeout: float = 90.0,
-        client: Optional[httpx.AsyncClient] = None,
+        client: httpx.AsyncClient | None = None,
     ):
         self.model = model
         self.api_key = api_key
         self.base_url = (base_url or "").rstrip("/")
         self.timeout = timeout
         self._external_client = client
-        self._owned_client: Optional[httpx.AsyncClient] = None
+        self._owned_client: httpx.AsyncClient | None = None
 
     @property
     def client(self) -> httpx.AsyncClient:
@@ -67,7 +69,7 @@ class BaseLLMProvider(ABC):
         self,
         system_prompt: str,
         user_prompt: str,
-        json_schema: dict[str, Any] | Type[BaseModel] | None = None,
+        json_schema: dict[str, Any] | type[BaseModel] | None = None,
     ) -> AsyncIterator[str]:
         """Stream structured JSON chunks from the LLM provider.
 
@@ -85,7 +87,7 @@ class BaseLLMProvider(ABC):
         self,
         system_prompt: str,
         user_prompt: str,
-        json_schema: dict[str, Any] | Type[BaseModel] | None = None,
+        json_schema: dict[str, Any] | type[BaseModel] | None = None,
     ) -> GitNarratorReport:
         """Stream the full LLM output, auto-repair, and return a validated GitNarratorReport."""
         chunks: list[str] = []

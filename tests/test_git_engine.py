@@ -1,14 +1,11 @@
 """Tests for git_engine module: repository inspection, change detection, and diff extraction."""
 
-from pathlib import Path
 import subprocess
-import tempfile
+from pathlib import Path
+
 import pytest
 
 from git_narrator.git_engine import (
-    CommitInfo,
-    FileNumStat,
-    GitCommandError,
     GitEngine,
     GitError,
     detect_change_scope,

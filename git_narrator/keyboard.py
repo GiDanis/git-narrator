@@ -1,6 +1,5 @@
 """Lightweight keyboard interaction utility for terminal navigation."""
 
-import sys
 import click
 
 

@@ -1,7 +1,9 @@
 """Anthropic Claude LLM provider driver using tool-use structured streaming."""
 
 import json
-from typing import Any, AsyncIterator, Optional, Type
+from collections.abc import AsyncIterator
+from typing import Any
+
 import httpx
 from pydantic import BaseModel
 
@@ -15,11 +17,11 @@ class AnthropicProvider(BaseLLMProvider):
     def __init__(
         self,
         model: str = "claude-3-5-sonnet-20241022",
-        api_key: Optional[str] = None,
-        base_url: Optional[str] = "https://api.anthropic.com",
+        api_key: str | None = None,
+        base_url: str | None = "https://api.anthropic.com",
         max_tokens: int = 4096,
         timeout: float = 90.0,
-        client: Optional[httpx.AsyncClient] = None,
+        client: httpx.AsyncClient | None = None,
     ):
         super().__init__(
             model=model,
@@ -63,7 +65,7 @@ class AnthropicProvider(BaseLLMProvider):
         self,
         system_prompt: str,
         user_prompt: str,
-        json_schema: dict[str, Any] | Type[BaseModel] | None = None,
+        json_schema: dict[str, Any] | type[BaseModel] | None = None,
     ) -> AsyncIterator[str]:
         """Stream structured JSON chunks from Anthropic tool input stream."""
         target_schema = resolve_schema_dict(json_schema)

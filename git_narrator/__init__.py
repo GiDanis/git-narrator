@@ -23,26 +23,6 @@ from git_narrator.git_engine import (
     is_git_repo,
     run_git,
 )
-from git_narrator.sanitizer import (
-    PruneReason,
-    PrunedFileInfo,
-    SanitizedDiffResult,
-    is_binary_path,
-    is_generated_content,
-    is_ignored_path,
-    is_minified_path,
-    load_narratorignore,
-    parse_gitattributes,
-    sanitize_diff,
-)
-from git_narrator.lockfile import (
-    DependencyChange,
-    compact_lockfile_diff,
-    format_lockfile_summary,
-    is_lockfile,
-    process_diff_lockfiles,
-    strip_lockfiles_and_inject_summary,
-)
 from git_narrator.knapsack import (
     DiffFile,
     DiffHunk,
@@ -55,6 +35,26 @@ from git_narrator.knapsack import (
     optimize_diff_tokens,
     parse_diff_files,
     score_hunk,
+)
+from git_narrator.lockfile import (
+    DependencyChange,
+    compact_lockfile_diff,
+    format_lockfile_summary,
+    is_lockfile,
+    process_diff_lockfiles,
+    strip_lockfiles_and_inject_summary,
+)
+from git_narrator.sanitizer import (
+    PrunedFileInfo,
+    PruneReason,
+    SanitizedDiffResult,
+    is_binary_path,
+    is_generated_content,
+    is_ignored_path,
+    is_minified_path,
+    load_narratorignore,
+    parse_gitattributes,
+    sanitize_diff,
 )
 
 __version__ = "0.1.0"

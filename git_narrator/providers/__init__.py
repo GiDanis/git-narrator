@@ -1,27 +1,28 @@
 """Provider drivers for git-narrator."""
 
 from typing import Any, Optional
-from git_narrator.providers.base import BaseLLMProvider
-from git_narrator.providers.ollama import OllamaProvider
-from git_narrator.providers.gemini import GeminiProvider
-from git_narrator.providers.openai import OpenAIProvider
+
 from git_narrator.providers.anthropic import AnthropicProvider
+from git_narrator.providers.base import BaseLLMProvider
+from git_narrator.providers.gemini import GeminiProvider
+from git_narrator.providers.ollama import OllamaProvider
+from git_narrator.providers.openai import OpenAIProvider
 
 __all__ = [
-    "BaseLLMProvider",
-    "OllamaProvider",
-    "GeminiProvider",
-    "OpenAIProvider",
     "AnthropicProvider",
+    "BaseLLMProvider",
+    "GeminiProvider",
+    "OllamaProvider",
+    "OpenAIProvider",
     "create_provider",
 ]
 
 
 def create_provider(
     provider_name: str,
-    model: Optional[str] = None,
-    api_key: Optional[str] = None,
-    base_url: Optional[str] = None,
+    model: str | None = None,
+    api_key: str | None = None,
+    base_url: str | None = None,
     **kwargs: Any,
 ) -> BaseLLMProvider:
     """Factory to instantiate the appropriate LLM provider.

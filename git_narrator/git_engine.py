@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import dataclasses
-from dataclasses import dataclass, field
-import os
-from pathlib import Path
 import re
 import shutil
 import subprocess
-from typing import Literal, Optional, Sequence
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Literal
 
 
 class GitError(Exception):
@@ -43,7 +42,7 @@ class FileNumStat:
     path: str
     additions: int
     deletions: int
-    old_path: Optional[str] = None
+    old_path: str | None = None
     is_binary: bool = False
 
 
@@ -76,12 +75,12 @@ class ChangeScope:
     """Detected scope of changes in the git repository."""
 
     scope_type: ChangeScopeType
-    ref: Optional[str] = None
+    ref: str | None = None
     description: str = ""
     staged_files: list[str] = field(default_factory=list)
     unstaged_files: list[str] = field(default_factory=list)
     untracked_files: list[str] = field(default_factory=list)
-    commit_info: Optional[CommitInfo] = None
+    commit_info: CommitInfo | None = None
 
 
 def run_git(
@@ -296,7 +295,7 @@ def detect_change_scope(repo_path: Path | str = ".") -> ChangeScope:
 
 def _resolve_target_args(
     repo_path: Path | str,
-    target: Optional[str] = None,
+    target: str | None = None,
     staged: bool = False,
     unified_context: int = 3,
 ) -> tuple[list[str], bool]:
@@ -339,10 +338,10 @@ def _resolve_target_args(
 
 def get_diff(
     repo_path: Path | str = ".",
-    target: Optional[str] = None,
+    target: str | None = None,
     staged: bool = False,
     unified_context: int = 3,
-    pathspecs: Optional[Sequence[str]] = None,
+    pathspecs: Sequence[str] | None = None,
 ) -> str:
     """Extract raw unified diff from repository.
 
@@ -368,7 +367,7 @@ def get_diff(
     return proc.stdout
 
 
-def _parse_numstat_line(line: str) -> Optional[FileNumStat]:
+def _parse_numstat_line(line: str) -> FileNumStat | None:
     """Parse a single line from `git diff --numstat`."""
     line = line.strip()
     if not line:
@@ -397,7 +396,7 @@ def _parse_numstat_line(line: str) -> Optional[FileNumStat]:
         return None
 
     # Handle rename syntax: {old => new}/path or old => new
-    old_path: Optional[str] = None
+    old_path: str | None = None
     path = path_part
     if " => " in path_part:
         rename_match = re.search(r"^(.*?)(?:\{([^{}]*) => ([^{}]*)\})(.*?)$", path_part)
@@ -421,9 +420,9 @@ def _parse_numstat_line(line: str) -> Optional[FileNumStat]:
 
 def get_numstat(
     repo_path: Path | str = ".",
-    target: Optional[str] = None,
+    target: str | None = None,
     staged: bool = False,
-    pathspecs: Optional[Sequence[str]] = None,
+    pathspecs: Sequence[str] | None = None,
 ) -> list[FileNumStat]:
     """Extract file modification statistics (`git diff --numstat`).
 
@@ -463,9 +462,9 @@ def get_numstat(
 
 def get_stat(
     repo_path: Path | str = ".",
-    target: Optional[str] = None,
+    target: str | None = None,
     staged: bool = False,
-    pathspecs: Optional[Sequence[str]] = None,
+    pathspecs: Sequence[str] | None = None,
 ) -> str:
     """Extract standard git diff summary (`git diff --stat`).
 
@@ -500,7 +499,7 @@ class GitEngine:
 
     def __init__(self, repo_path: Path | str = "."):
         self.repo_path = Path(repo_path).resolve()
-        self._root: Optional[Path] = None
+        self._root: Path | None = None
 
     @property
     def root(self) -> Path:
@@ -523,10 +522,10 @@ class GitEngine:
 
     def get_diff(
         self,
-        target: Optional[str] = None,
+        target: str | None = None,
         staged: bool = False,
         unified_context: int = 3,
-        pathspecs: Optional[Sequence[str]] = None,
+        pathspecs: Sequence[str] | None = None,
     ) -> str:
         """Extract diff."""
         return get_diff(
@@ -539,9 +538,9 @@ class GitEngine:
 
     def get_numstat(
         self,
-        target: Optional[str] = None,
+        target: str | None = None,
         staged: bool = False,
-        pathspecs: Optional[Sequence[str]] = None,
+        pathspecs: Sequence[str] | None = None,
     ) -> list[FileNumStat]:
         """Extract numstat."""
         return get_numstat(
@@ -553,9 +552,9 @@ class GitEngine:
 
     def get_stat(
         self,
-        target: Optional[str] = None,
+        target: str | None = None,
         staged: bool = False,
-        pathspecs: Optional[Sequence[str]] = None,
+        pathspecs: Sequence[str] | None = None,
     ) -> str:
         """Extract stat."""
         return get_stat(

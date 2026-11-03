@@ -1,7 +1,7 @@
 """Pydantic v2 schemas for git-narrator architectural reports."""
 
 from enum import Enum
-from typing import Optional
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -40,11 +40,11 @@ class RiskRadarItem(BaseModel):
         ...,
         description="Short, descriptive headline of the risk.",
     )
-    file_path: Optional[str] = Field(
+    file_path: str | None = Field(
         default=None,
         description="Path of the affected file if localized to a file.",
     )
-    line_hint: Optional[str] = Field(
+    line_hint: str | None = Field(
         default=None,
         description="Line number or range hint where the issue originates.",
     )
@@ -168,7 +168,7 @@ class GitNarratorReport(BaseModel):
         default_factory=list,
         description="Identified risks focusing on negative space, race conditions, test gaps, and contracts.",
     )
-    visual_flow: Optional[VisualFlow] = Field(
+    visual_flow: VisualFlow | None = Field(
         default=None,
         description="Visual flow diagram (Mermaid + ASCII fallback).",
     )

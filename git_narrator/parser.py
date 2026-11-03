@@ -3,14 +3,12 @@
 import json
 import logging
 import re
-from typing import Any, Optional
+from typing import Any
+
 from pydantic import ValidationError
 
 from git_narrator.schemas import (
-    ArchitectureNarrative,
-    ExecutiveSummary,
     GitNarratorReport,
-    ReviewChecklist,
 )
 
 logger = logging.getLogger(__name__)
@@ -18,7 +16,6 @@ logger = logging.getLogger(__name__)
 
 class JSONParseError(Exception):
     """Raised when all JSON parsing tiers fail."""
-    pass
 
 
 def extract_code_fences(text: str) -> list[str]:
@@ -28,7 +25,7 @@ def extract_code_fences(text: str) -> list[str]:
     return [m.strip() for m in matches if m.strip()]
 
 
-def extract_balanced_braces(text: str) -> Optional[str]:
+def extract_balanced_braces(text: str) -> str | None:
     """Tier 3: Extract candidate JSON object from first '{' to last '}'."""
     first_brace = text.find("{")
     last_brace = text.rfind("}")

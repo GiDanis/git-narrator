@@ -1,7 +1,8 @@
 """Zero-bloat async HTTPX engine and unified streaming transport."""
 
 import logging
-from typing import AsyncIterator, Optional
+from collections.abc import AsyncIterator
+
 import httpx
 
 logger = logging.getLogger(__name__)
@@ -17,7 +18,6 @@ DEFAULT_TIMEOUT = httpx.Timeout(
 
 class TransportError(Exception):
     """Base exception for transport and networking failures."""
-    pass
 
 
 class HTTPStatusError(TransportError):
@@ -31,13 +31,12 @@ class HTTPStatusError(TransportError):
 
 class StreamTimeoutError(TransportError):
     """Raised when an active stream times out."""
-    pass
 
 
 def create_http_client(
-    timeout: Optional[float | httpx.Timeout] = None,
-    limits: Optional[httpx.Limits] = None,
-    transport: Optional[httpx.AsyncBaseTransport] = None,
+    timeout: float | httpx.Timeout | None = None,
+    limits: httpx.Limits | None = None,
+    transport: httpx.AsyncBaseTransport | None = None,
 ) -> httpx.AsyncClient:
     """Create an AsyncClient configured for reliable LLM streaming.
 

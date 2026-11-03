@@ -2,10 +2,9 @@
 
 import json
 import os
-from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
 import socket
-
+from pathlib import Path
+from typing import Any
 
 GLOBAL_CONFIG_PATH = Path.home() / ".config" / "git-narrator" / "config.json"
 LOCAL_CONFIG_NAME = ".gitnarrator.json"
@@ -16,13 +15,13 @@ def is_ollama_reachable(host: str = "127.0.0.1", port: int = 11434, timeout: flo
     try:
         with socket.create_connection((host, port), timeout=timeout):
             return True
-    except (OSError, socket.timeout):
+    except (TimeoutError, OSError):
         return False
 
 
-def load_config() -> Dict[str, Any]:
+def load_config() -> dict[str, Any]:
     """Loads combined configuration from global and local project files."""
-    config: Dict[str, Any] = {}
+    config: dict[str, Any] = {}
 
     if GLOBAL_CONFIG_PATH.exists():
         try:
@@ -43,7 +42,7 @@ def load_config() -> Dict[str, Any]:
     return config
 
 
-def save_global_config(data: Dict[str, Any]) -> None:
+def save_global_config(data: dict[str, Any]) -> None:
     """Saves user preferences to ~/.config/git-narrator/config.json."""
     GLOBAL_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     current = load_config()
@@ -54,9 +53,9 @@ def save_global_config(data: Dict[str, Any]) -> None:
 
 def resolve_provider_and_model(
     forced_local: bool = False,
-    override_provider: Optional[str] = None,
-    override_model: Optional[str] = None,
-) -> Tuple[str, str, Optional[str], Optional[str]]:
+    override_provider: str | None = None,
+    override_model: str | None = None,
+) -> tuple[str, str, str | None, str | None]:
     """Resolves the active provider, model name, API key, and base URL.
     
     Returns: (provider_name, model_name, api_key, base_url)
