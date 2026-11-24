@@ -8,7 +8,49 @@ import httpx
 from pydantic import BaseModel
 
 from git_narrator.providers.base import BaseLLMProvider, resolve_schema_dict
-from git_narrator.transport import aiter_sse_data
+from git_narrator.transport import aiter_sse_data, send_streaming_with_retry
+
+
+def prepare_openai_strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Normalize JSON schema to satisfy OpenAI strict structured outputs.
+
+    OpenAI strict mode mandates:
+    - Dereferenced objects (no sibling keywords alongside '$ref')
+    - 'additionalProperties': false on every object schema
+    - Every key in 'properties' listed in 'required'
+    - No unsupported keywords like 'default', '$defs', '$schema', 'title'
+    """
+    defs = schema.get("$defs", {})
+
+    def transform(node: Any) -> Any:
+        if isinstance(node, dict):
+            if "$ref" in node:
+                ref_path = str(node["$ref"])
+                if ref_path.startswith("#/$defs/"):
+                    def_name = ref_path.split("/")[-1]
+                    if def_name in defs:
+                        return transform(defs[def_name])
+
+            out: dict[str, Any] = {}
+            for k, v in node.items():
+                if k in ("$defs", "$schema", "title", "default"):
+                    continue
+                out[k] = transform(v)
+
+            if out.get("type") == "object" or "properties" in out:
+                props = out.get("properties")
+                if isinstance(props, dict):
+                    out["required"] = list(props.keys())
+                out["additionalProperties"] = False
+                out.setdefault("type", "object")
+            return out
+
+        if isinstance(node, list):
+            return [transform(item) for item in node]
+        return node
+
+    result = transform(schema)
+    return result if isinstance(result, dict) else {}
 
 
 class OpenAIProvider(BaseLLMProvider):
@@ -16,12 +58,13 @@ class OpenAIProvider(BaseLLMProvider):
 
     def __init__(
         self,
-        model: str = "gpt-4o",
+        model: str = "gpt-4.1-mini",
         api_key: str | None = None,
         base_url: str | None = "https://api.openai.com/v1",
         timeout: float = 90.0,
         strict_schema: bool = True,
         use_json_object: bool = False,
+        temperature: float = 0.1,
         client: httpx.AsyncClient | None = None,
     ):
         super().__init__(
@@ -33,6 +76,8 @@ class OpenAIProvider(BaseLLMProvider):
         )
         self.strict_schema = strict_schema
         self.use_json_object = use_json_object
+        self.temperature = temperature
+        self.supports_native_schema = not use_json_object
 
     def build_payload(
         self,
@@ -47,18 +92,24 @@ class OpenAIProvider(BaseLLMProvider):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
+            "temperature": self.temperature,
             "stream": True,
         }
 
         if self.use_json_object:
             payload["response_format"] = {"type": "json_object"}
         elif target_schema:
+            formatted_schema = (
+                prepare_openai_strict_schema(target_schema)
+                if self.strict_schema
+                else target_schema
+            )
             payload["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {
                     "name": "git_narrator_report",
                     "strict": self.strict_schema,
-                    "schema": target_schema,
+                    "schema": formatted_schema,
                 },
             }
 
@@ -82,14 +133,13 @@ class OpenAIProvider(BaseLLMProvider):
 
         payload = self.build_payload(system_prompt, user_prompt, target_schema)
 
-        request = self.client.build_request(
-            method="POST",
-            url=endpoint,
+        response = await send_streaming_with_retry(
+            self.client,
+            "POST",
+            endpoint,
             headers=headers,
-            json=payload,
+            json_payload=payload,
         )
-
-        response = await self.client.send(request, stream=True)
         try:
             async for sse_event in aiter_sse_data(response, stop_sentinel="[DONE]"):
                 try:

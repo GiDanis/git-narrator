@@ -15,6 +15,7 @@ You adhere strictly to the following architectural analysis guidelines:
   * Before: How did the components, data models, or control flows behave prior to this change?
   * After: What new mental model, patterns (e.g., event-driven, circuit breaker, adapter), or invariants govern the system now?
 - Explicitly explain the architectural "Why": Why was this change made? What problem does it solve?
+- Set `executive_summary.blast_radius` strictly to one of: CRITICAL, HIGH, MEDIUM, or LOW.
 - Highlight structural mutations across components, categorizing them clearly (ADDED, MODIFIED, REMOVED, REFACTORED, DEPRECATED).
 - Evaluate technical debt: explicitly state whether this commit pays down debt, introduces tactical trade-offs, or leaves open architectural holes.
 
@@ -22,7 +23,7 @@ You adhere strictly to the following architectural analysis guidelines:
 Examine the "negative space" — what is MISSING or implicit rather than merely what is visible:
 - CONTRACT_BREAK: Silent contract breaks in internal/external APIs, altered schema assumptions, altered return types, or mutated interfaces that break upstream/downstream callers.
 - TEST_GAP: Code paths, edge cases, error handlers, or null/exception flows introduced or modified without corresponding automated test coverage.
-- SECURITY_LEAK: Unsanitized user inputs, injection risks, auth/permission bypasses, secret leaks, SSRF, IDOR, or insecure defaults.
+- SECURITY_LEAK: Unsanitized user inputs, injection risks, auth/permission bypasses, secret leaks, SSRF, IDOR, or insecure defaults. Note: `[REDACTED:<TYPE>]` placeholders indicate secrets scrubbed prior to analysis — preserve awareness of those security findings.
 - PERFORMANCE_REGRESSION: N+1 query patterns, algorithmic bottlenecks, unindexed searches, memory leaks, blocking operations inside async event loops, or unthrottled loops.
 - CONCURRENCY_RACE: Race conditions, missing mutexes/locks, unsynchronized shared mutable state, TOCTOU hazards, or unhandled coroutine cancellations.
 - HALLUCINATED_DEPENDENCY: New dependencies introduced that are insecure, unvetted, unpinned, typosquatted, or redundant.
@@ -45,8 +46,8 @@ For every identified risk, specify a concrete, actionable remediation.
 - Example: `feat(auth): validate JWT signatures against rotated public keys`
 
 ### 5. STRICT JSON OUTPUT
-- You must produce a single, valid JSON object matching the `GitNarratorReport` schema.
-- Do not include conversational preambles or postscripts.
+- Produce a single, valid JSON object matching the `GitNarratorReport` schema.
+- Do not include conversational preambles, markdown prose, or postscripts.
 """
 
 
@@ -56,15 +57,24 @@ def build_narrator_prompt(
     lockfile_mutations: str = "",
     branch_info: str = "",
     extra_context: str = "",
+    commit_context: str = "",
+    pruned_summary: str = "",
+    language: str | None = None,
+    include_schema: bool = False,
 ) -> str:
     """Build the comprehensive user prompt for git-narrator analysis.
 
     Args:
         diff: The sanitized git diff content.
         stat: The git diff --stat summary.
-        lockfile_mutations: Extracted package/lockfile changes (e.g. poetry.lock, uv.lock, package-lock.json).
+        lockfile_mutations: Extracted package/lockfile changes.
         branch_info: Current branch, target branch, or commit hash references.
-        extra_context: Any optional user instructions or architectural notes.
+        extra_context: Optional user instructions or architectural notes.
+        commit_context: Original commit subject/body metadata when analyzing historical commits.
+        pruned_summary: Concise list of pruned binary/generated/ignored files so LLM has full context.
+        language: Optional target output language for prose descriptions (e.g., 'Italian', 'Spanish').
+        include_schema: Whether to embed compact JSON schema directly in the prompt
+            (disable when provider enforces native structured schema).
 
     Returns:
         Structured user prompt ready for LLM consumption.
@@ -73,11 +83,23 @@ def build_narrator_prompt(
         "Please analyze the following git changeset and produce a complete GitNarratorReport JSON object.\n"
     ]
 
+    if language and language.strip():
+        sections.append(
+            f"### OUTPUT LANGUAGE\nWrite narrative fields (headline, intent, explanations, summaries) "
+            f"in **{language.strip()}**, while keeping JSON keys, risk enums, and conventional commit type English-standard.\n"
+        )
+
     if branch_info.strip():
         sections.append(f"### BRANCH & REVISION CONTEXT\n{branch_info.strip()}\n")
 
+    if commit_context.strip():
+        sections.append(f"### EXISTING COMMIT METADATA\n{commit_context.strip()}\n")
+
     if stat.strip():
         sections.append(f"### GIT DIFF STAT SUMMARY\n```\n{stat.strip()}\n```\n")
+
+    if pruned_summary.strip():
+        sections.append(f"### PRUNED / NON-TEXT FILES IN CHANGESET\n{pruned_summary.strip()}\n")
 
     if lockfile_mutations.strip():
         sections.append(
@@ -87,18 +109,17 @@ def build_narrator_prompt(
     if extra_context.strip():
         sections.append(f"### ADDITIONAL CONTEXT / INTENT\n{extra_context.strip()}\n")
 
-    sanitized_diff = diff.strip()
-    if not sanitized_diff:
-        sanitized_diff = "(Empty diff)"
-
+    sanitized_diff = diff.strip() or "(Empty diff)"
     sections.append(f"### GIT DIFF\n```diff\n{sanitized_diff}\n```\n")
 
-    schema_json = json.dumps(GitNarratorReport.model_json_schema(), indent=2)
-    sections.append(
-        f"### REQUIRED JSON SCHEMA\n"
-        f"Your response MUST strictly conform to this JSON Schema:\n"
-        f"```json\n{schema_json}\n```\n"
-        f"Respond ONLY with the JSON object."
-    )
+    if include_schema:
+        # Compact JSON avoids ~900+ tokens of pretty-print indentation overhead
+        schema_json = json.dumps(GitNarratorReport.model_json_schema(), separators=(",", ":"))
+        sections.append(
+            f"### REQUIRED JSON SCHEMA\n"
+            f"Your response MUST strictly conform to this JSON Schema:\n"
+            f"```json\n{schema_json}\n```\n"
+            f"Respond ONLY with the JSON object."
+        )
 
     return "\n".join(sections)

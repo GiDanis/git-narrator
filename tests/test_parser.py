@@ -136,7 +136,7 @@ def test_tier_4_truncated_json_string_repair():
     parsed = json.loads(repaired)
     assert parsed["executive_summary"]["headline"] == "Add new authentication gateway"
 
-    data, tier = parse_narrator_json(truncated)
+    _data, tier = parse_narrator_json(truncated)
     assert tier == 4
 
     report = parse_and_validate_report(truncated)
@@ -178,7 +178,7 @@ We changed the database driver from psycopg2 to asyncpg.
 This improves throughput by 40% under concurrent loads.
 Ensure pg_stat_activity is monitored post deploy.
 """
-    data, tier = parse_narrator_json(raw_text)
+    _data, tier = parse_narrator_json(raw_text)
     assert tier == 5
 
     report = parse_and_validate_report(raw_text)
@@ -214,3 +214,24 @@ def test_coercion_on_partial_dict():
     assert isinstance(report, GitNarratorReport)
     assert report.executive_summary.headline == "Partial diff summary"
     assert report.architecture_narrative.before_state != ""
+
+
+def test_coercion_preserves_valid_risk_items_when_one_is_malformed():
+    """Verify one malformed risk_radar item doesn't discard valid findings."""
+    payload = {
+        **SAMPLE_VALID_REPORT,
+        "risk_radar": [
+            {
+                "category": "breaking_change",  # Alias + lowercase normalized cleanly
+                "severity": "critical",
+                "title": "Public API param renamed",
+                "explanation": "Callers passing old keyword fail.",
+                "remediation": "Keep deprecated alias.",
+            },
+            {"category": "NOT_A_REAL_CATEGORY"},  # Broken entry should be skipped alone
+        ],
+    }
+    report = parse_and_validate_report(json.dumps(payload))
+    assert len(report.risk_radar) == 1
+    assert report.risk_radar[0].category == RiskCategory.CONTRACT_BREAK
+    assert report.risk_radar[0].severity == RiskSeverity.CRITICAL

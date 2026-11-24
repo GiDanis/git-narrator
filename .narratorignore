@@ -16,6 +16,16 @@ node_modules/
 vendor/
 .venv/
 
+# Secrets & private keys (never transmit raw credential files)
+.env
+.env.*
+!.env.example
+!.env.template
+*.pem
+*.key
+*.p12
+*.pfx
+
 # Binary & media
 *.png
 *.jpg
@@ -27,6 +37,7 @@ vendor/
 *.ico
 *.zip
 *.tar.gz
+*.lockb
 
 # Generated frameworks
 .next/

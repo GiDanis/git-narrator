@@ -2,25 +2,43 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from typing import Literal
 
 from git_narrator.sanitizer import split_diff_into_file_chunks
 
-# Recognized lockfile names and patterns
 LOCKFILE_FILENAMES = {
     "package-lock.json",
     "pnpm-lock.yaml",
     "yarn.lock",
+    "bun.lock",
     "cargo.lock",
     "poetry.lock",
     "uv.lock",
+    "pdm.lock",
+    "go.sum",
+    "gemfile.lock",
+    "composer.lock",
 }
 
 ChangeType = Literal["ADDED", "REMOVED", "UPGRADED", "DOWNGRADED"]
+
+_IGNORED_NPM_KEYS = {
+    "version", "resolved", "integrity", "dev", "requires", "dependencies",
+    "peerDependencies", "devDependencies", "packages", "engines", "license",
+    "funding", "optional", "peer", "bin", "name", "description", "homepage",
+    "repository", "keywords", "author", "bugs", "main", "module", "types",
+    "typings", "sideEffects", "os", "cpu", "scripts",
+}
+
+_IGNORED_PNPM_KEYS = {
+    "lockfileVersion", "dev", "optional", "hasBin", "deprecated", "resolution",
+    "integrity", "tarball", "engines", "os", "cpu", "libc", "requiresBuild",
+    "transitivePeerDependencies",
+}
 
 
 @dataclass(frozen=True)
@@ -38,134 +56,107 @@ class DependencyChange:
         """Format into high-signal metadata string."""
         if self.change_type == "UPGRADED":
             return f"[UPGRADE] {self.name} {self.old_version} -> {self.new_version}"
-        elif self.change_type == "DOWNGRADED":
+        if self.change_type == "DOWNGRADED":
             return f"[DOWNGRADE] {self.name} {self.old_version} -> {self.new_version}"
-        elif self.change_type == "ADDED":
+        if self.change_type == "ADDED":
             ver = f" {self.new_version}" if self.new_version else ""
             return f"[ADD] {self.name}{ver}"
-        elif self.change_type == "REMOVED":
+        if self.change_type == "REMOVED":
             ver = f" {self.old_version}" if self.old_version else ""
             return f"[REMOVE] {self.name}{ver}"
         return f"[{self.change_type}] {self.name}"
 
 
 def is_lockfile(path: str | Path) -> bool:
-    """Determine if a file path is a known package manager lockfile or requirements file.
-
-    Args:
-        path: File path to inspect.
-
-    Returns:
-        True if the file matches recognized lockfile patterns.
-    """
+    """Determine if a file path is a known package manager lockfile or requirements file."""
     filename = Path(path).name.lower()
     if filename in LOCKFILE_FILENAMES:
         return True
-
-    # Requirements files
-    if "requirements" in filename and filename.endswith(".txt"):
-        return True
-
-    return False
+    return "requirements" in filename and filename.endswith(".txt")
 
 
 def detect_package_manager(path: str | Path) -> str:
     """Identify package manager from lockfile path."""
     filename = Path(path).name.lower()
-    if filename == "package-lock.json":
-        return "npm"
-    elif filename == "pnpm-lock.yaml":
-        return "pnpm"
-    elif filename == "yarn.lock":
-        return "yarn"
-    elif filename == "cargo.lock":
-        return "cargo"
-    elif filename == "poetry.lock":
-        return "poetry"
-    elif filename == "uv.lock":
-        return "uv"
-    elif "requirements" in filename:
+    mapping = {
+        "package-lock.json": "npm",
+        "pnpm-lock.yaml": "pnpm",
+        "yarn.lock": "yarn",
+        "bun.lock": "bun",
+        "cargo.lock": "cargo",
+        "poetry.lock": "poetry",
+        "uv.lock": "uv",
+        "pdm.lock": "pdm",
+        "go.sum": "go",
+        "gemfile.lock": "bundler",
+        "composer.lock": "composer",
+    }
+    if filename in mapping:
+        return mapping[filename]
+    if "requirements" in filename:
         return "pip"
     return "unknown"
 
 
+def _parse_semver_key(ver: str) -> tuple[tuple[int, ...], int, str]:
+    """Build comparable version sort key supporting prereleases (1.0.0-alpha.1 < 1.0.0)."""
+    clean = re.sub(r"^[vV]", "", ver.strip())
+    core_part, _, pre_part = clean.partition("-")
+    # Split build metadata if present
+    core_part = core_part.split("+", 1)[0]
+    nums: list[int] = []
+    for seg in core_part.split("."):
+        m = re.match(r"^(\d+)", seg)
+        nums.append(int(m.group(1)) if m else 0)
+    # Stable release (no prerelease) sorts ABOVE any prerelease (1 > 0)
+    is_stable = 0 if pre_part else 1
+    return (tuple(nums), is_stable, pre_part)
+
+
 def _compare_versions(old_ver: str, new_ver: str) -> ChangeType:
     """Compare two version strings to determine UPGRADED vs DOWNGRADED."""
-    # Extract digit sequences
-    def parse_parts(v: str) -> list[int]:
-        clean = re.sub(r"^[vV]", "", v.strip())
-        parts = []
-        for segment in re.split(r"[\.-]", clean):
-            match = re.match(r"^\d+", segment)
-            if match:
-                parts.append(int(match.group(0)))
-            else:
-                parts.append(0)
-        return parts
-
     try:
-        p_old = parse_parts(old_ver)
-        p_new = parse_parts(new_ver)
-        # Pad with zeros
-        max_len = max(len(p_old), len(p_new))
-        p_old += [0] * (max_len - len(p_old))
-        p_new += [0] * (max_len - len(p_new))
-        if p_new > p_old:
+        old_nums, old_stable, old_pre = _parse_semver_key(old_ver)
+        new_nums, new_stable, new_pre = _parse_semver_key(new_ver)
+
+        max_len = max(len(old_nums), len(new_nums))
+        o_pad = old_nums + (0,) * (max_len - len(old_nums))
+        n_pad = new_nums + (0,) * (max_len - len(new_nums))
+
+        if (n_pad, new_stable, new_pre) > (o_pad, old_stable, old_pre):
             return "UPGRADED"
-        elif p_new < p_old:
+        if (n_pad, new_stable, new_pre) < (o_pad, old_stable, old_pre):
             return "DOWNGRADED"
-        else:
-            return "UPGRADED"
-    except Exception:
+        return "UPGRADED"
+    except (ValueError, TypeError):
         return "UPGRADED"
 
 
-# ---------------------------------------------------------------------------
-# Format Parsers
-# ---------------------------------------------------------------------------
-
-def _parse_requirements_diff(diff_content: str, file_path: str) -> list[DependencyChange]:
-    """Parse requirements.txt diffs."""
-    # Matches: +requests==2.31.0 or -urllib3>=1.26.0
-    req_pattern = re.compile(
-        r"^([+-])\s*([a-zA-Z0-9_\-\.]+)\s*(?:==|>=|<=|~=|===)\s*([a-zA-Z0-9_\-\.\+]+)"
-    )
-
-    removed: dict[str, str] = {}
-    added: dict[str, str] = {}
-
-    for line in diff_content.splitlines():
-        if not line or line.startswith("---") or line.startswith("+++"):
-            continue
-        match = req_pattern.match(line)
-        if match:
-            sign, name, ver = match.groups()
-            name = name.lower()
-            if sign == "-":
-                removed[name] = ver
-            elif sign == "+":
-                added[name] = ver
-
+def _build_changes_from_maps(
+    removed: dict[str, str],
+    added: dict[str, str],
+    file_path: str,
+    manager: str,
+) -> list[DependencyChange]:
+    """Shared delta assembler turning {pkg: old_ver} and {pkg: new_ver} into DependencyChanges."""
     changes: list[DependencyChange] = []
-    all_names = set(removed.keys()).union(added.keys())
-
-    for name in sorted(all_names):
-        if name in removed and name in added:
-            old_v = removed[name]
-            new_v = added[name]
+    for name in sorted(set(removed) | set(added)):
+        in_rem = name in removed
+        in_add = name in added
+        if in_rem and in_add:
+            old_v, new_v = removed[name], added[name]
             if old_v != new_v:
-                c_type = _compare_versions(old_v, new_v)
                 changes.append(
                     DependencyChange(
                         name=name,
-                        change_type=c_type,
+                        change_type=_compare_versions(old_v, new_v),
                         old_version=old_v,
                         new_version=new_v,
                         file=file_path,
-                        manager="pip",
+                        manager=manager,
                     )
                 )
-        elif name in added:
+        elif in_add:
             changes.append(
                 DependencyChange(
                     name=name,
@@ -173,10 +164,10 @@ def _parse_requirements_diff(diff_content: str, file_path: str) -> list[Dependen
                     old_version=None,
                     new_version=added[name],
                     file=file_path,
-                    manager="pip",
+                    manager=manager,
                 )
             )
-        elif name in removed:
+        else:
             changes.append(
                 DependencyChange(
                     name=name,
@@ -184,40 +175,54 @@ def _parse_requirements_diff(diff_content: str, file_path: str) -> list[Dependen
                     old_version=removed[name],
                     new_version=None,
                     file=file_path,
-                    manager="pip",
+                    manager=manager,
                 )
             )
-
     return changes
 
 
+def _parse_requirements_diff(diff_content: str, file_path: str) -> list[DependencyChange]:
+    """Parse requirements.txt diffs."""
+    req_pattern = re.compile(
+        r"^([+-])\s*([a-zA-Z0-9_\-\.]+)\s*(?:==|>=|<=|~=|===)\s*([a-zA-Z0-9_\-\.\+]+)"
+    )
+    removed: dict[str, str] = {}
+    added: dict[str, str] = {}
+
+    for line in diff_content.splitlines():
+        if not line or line.startswith(("---", "+++")):
+            continue
+        match = req_pattern.match(line)
+        if match:
+            sign, name, ver = match.groups()
+            norm = name.lower()
+            if sign == "-":
+                removed[norm] = ver
+            elif sign == "+":
+                added[norm] = ver
+
+    return _build_changes_from_maps(removed, added, file_path, "pip")
+
+
 def _parse_toml_lock_diff(diff_content: str, file_path: str, manager: str) -> list[DependencyChange]:
-    """Parse Cargo.lock, uv.lock, poetry.lock diffs."""
-    lines = diff_content.splitlines()
+    """Parse Cargo.lock, uv.lock, poetry.lock, and pdm.lock diffs."""
+    removed: dict[str, str] = {}
+    added: dict[str, str] = {}
 
-    # Track package modifications
-    # Cargo/uv/poetry packages are organized in blocks:
-    # [[package]]
-    # name = "serde"
-    # version = "1.0.197"
-    removed_packages: dict[str, str] = {}
-    added_packages: dict[str, str] = {}
-
-    # State machine for diff blocks
     current_name: str | None = None
     old_ver: str | None = None
     new_ver: str | None = None
 
-    def commit_package():
+    def commit_package() -> None:
         nonlocal current_name, old_ver, new_ver
         if current_name:
             if old_ver and not new_ver:
-                removed_packages[current_name] = old_ver
+                removed[current_name] = old_ver
             elif new_ver and not old_ver:
-                added_packages[current_name] = new_ver
+                added[current_name] = new_ver
             elif old_ver and new_ver and old_ver != new_ver:
-                removed_packages[current_name] = old_ver
-                added_packages[current_name] = new_ver
+                removed[current_name] = old_ver
+                added[current_name] = new_ver
         current_name = None
         old_ver = None
         new_ver = None
@@ -226,14 +231,13 @@ def _parse_toml_lock_diff(diff_content: str, file_path: str, manager: str) -> li
     ver_regex = re.compile(r'^([+-])\s*version\s*=\s*"([^"]+)"')
     pkg_header_regex = re.compile(r'^[+-]?\s*\[\[package\]\]')
 
-    for line in lines:
+    for line in diff_content.splitlines():
         if pkg_header_regex.match(line):
             commit_package()
             continue
 
         n_match = name_regex.match(line)
         if n_match:
-            # If name changed inside block, commit previous
             if current_name and current_name != n_match.group(1):
                 commit_package()
             current_name = n_match.group(1)
@@ -248,78 +252,24 @@ def _parse_toml_lock_diff(diff_content: str, file_path: str, manager: str) -> li
                 new_ver = ver
 
     commit_package()
-
-    changes: list[DependencyChange] = []
-    all_names = set(removed_packages.keys()).union(added_packages.keys())
-
-    for name in sorted(all_names):
-        if name in removed_packages and name in added_packages:
-            o_v = removed_packages[name]
-            n_v = added_packages[name]
-            if o_v != n_v:
-                c_type = _compare_versions(o_v, n_v)
-                changes.append(
-                    DependencyChange(
-                        name=name,
-                        change_type=c_type,
-                        old_version=o_v,
-                        new_version=n_v,
-                        file=file_path,
-                        manager=manager,
-                    )
-                )
-        elif name in added_packages:
-            changes.append(
-                DependencyChange(
-                    name=name,
-                    change_type="ADDED",
-                    old_version=None,
-                    new_version=added_packages[name],
-                    file=file_path,
-                    manager=manager,
-                )
-            )
-        elif name in removed_packages:
-            changes.append(
-                DependencyChange(
-                    name=name,
-                    change_type="REMOVED",
-                    old_version=removed_packages[name],
-                    new_version=None,
-                    file=file_path,
-                    manager=manager,
-                )
-            )
-
-    return changes
+    return _build_changes_from_maps(removed, added, file_path, manager)
 
 
-def _parse_npm_diff(diff_content: str, file_path: str) -> list[DependencyChange]:
-    """Parse package-lock.json diffs."""
-    lines = diff_content.splitlines()
-
+def _parse_npm_diff(diff_content: str, file_path: str, manager: str = "npm") -> list[DependencyChange]:
+    """Parse package-lock.json and composer.lock style JSON diffs."""
     removed: dict[str, str] = {}
     added: dict[str, str] = {}
 
-    # Ignored npm json property keys
-    ignored_npm_keys = {
-        "version", "resolved", "integrity", "dev", "requires", "dependencies",
-        "peerDependencies", "devDependencies", "packages", "engines", "license",
-        "funding", "optional", "peer", "bin"
-    }
-
-    # Matches "node_modules/axios": { or "axios": {
-    pkg_entry_regex = re.compile(r'^\s*[+-]?\s*"((?:node_modules/)?([@a-zA-Z0-9_\-\./]+))":\s*\{?')
+    pkg_entry_regex = re.compile(r'^\s*[+-]?\s*"((?:node_modules/)*([@a-zA-Z0-9_\-\./]+))":\s*\{?')
     ver_regex = re.compile(r'^\s*([+-])\s*"version":\s*"([^"]+)"')
-    simple_dep_regex = re.compile(r'^\s*([+-])\s*"([@a-zA-Z0-9_\-\./]+)":\s*"([^"]+)"')
+    simple_dep_regex = re.compile(r'^\s*([+-])\s*"([@a-zA-Z0-9_\-\./]+)":\s*"([^"]+)",?\s*$')
 
     current_pkg: str | None = None
 
-    for line in lines:
-        if line.startswith("---") or line.startswith("+++"):
+    for line in diff_content.splitlines():
+        if line.startswith(("---", "+++")):
             continue
 
-        # Check version diff first
         v_match = ver_regex.match(line)
         if v_match and current_pkg:
             sign, ver = v_match.groups()
@@ -332,79 +282,34 @@ def _parse_npm_diff(diff_content: str, file_path: str) -> list[DependencyChange]
         p_match = pkg_entry_regex.match(line)
         if p_match:
             full_target = p_match.group(1)
-            # Normalize node_modules/foo -> foo
-            clean_name = full_target.replace("node_modules/", "")
-            if clean_name and clean_name not in ignored_npm_keys and not clean_name.startswith("."):
+            clean_name = full_target.rsplit("node_modules/", 1)[-1]
+            if clean_name and clean_name not in _IGNORED_NPM_KEYS and not clean_name.startswith("."):
                 current_pkg = clean_name
             continue
 
         s_match = simple_dep_regex.match(line)
         if s_match:
             sign, name, ver = s_match.groups()
-            clean_name = name.replace("node_modules/", "")
-            if clean_name and clean_name not in ignored_npm_keys and not clean_name.startswith("."):
+            clean_name = name.rsplit("node_modules/", 1)[-1]
+            if clean_name and clean_name not in _IGNORED_NPM_KEYS and not clean_name.startswith("."):
                 if sign == "-":
                     removed[clean_name] = ver
                 elif sign == "+":
                     added[clean_name] = ver
 
-    changes: list[DependencyChange] = []
-    all_names = set(removed.keys()).union(added.keys())
-
-    for name in sorted(all_names):
-        if name in removed and name in added:
-            old_v = removed[name]
-            new_v = added[name]
-            if old_v != new_v:
-                changes.append(
-                    DependencyChange(
-                        name=name,
-                        change_type=_compare_versions(old_v, new_v),
-                        old_version=old_v,
-                        new_version=new_v,
-                        file=file_path,
-                        manager="npm",
-                    )
-                )
-        elif name in added:
-            changes.append(
-                DependencyChange(
-                    name=name,
-                    change_type="ADDED",
-                    old_version=None,
-                    new_version=added[name],
-                    file=file_path,
-                    manager="npm",
-                )
-            )
-        elif name in removed:
-            changes.append(
-                DependencyChange(
-                    name=name,
-                    change_type="REMOVED",
-                    old_version=removed[name],
-                    new_version=None,
-                    file=file_path,
-                    manager="npm",
-                )
-            )
-
-    return changes
+    return _build_changes_from_maps(removed, added, file_path, manager)
 
 
 def _parse_yarn_diff(diff_content: str, file_path: str) -> list[DependencyChange]:
     """Parse yarn.lock diffs."""
-    lines = diff_content.splitlines()
-
-    # Matches axios@^1.2.0: or "@babel/core@^7.0.0":
     header_regex = re.compile(r'^[+-]?\s*"?([@a-zA-Z0-9_\-\./]+)@[^:]+:\s*$')
-    ver_regex = re.compile(r'^([+-])\s*version\s*"([^"]+)"')
+    ver_regex = re.compile(r'^([+-])\s*version\s+"([^"]+)"')
 
     removed: dict[str, str] = {}
     added: dict[str, str] = {}
     current_pkg: str | None = None
 
-    for line in lines:
+    for line in diff_content.splitlines():
         h_match = header_regex.match(line)
         if h_match:
             current_pkg = h_match.group(1)
@@ -418,64 +323,19 @@ def _parse_yarn_diff(diff_content: str, file_path: str) -> list[DependencyChange
             elif sign == "+":
                 added[current_pkg] = ver
 
-    changes: list[DependencyChange] = []
-    all_names = set(removed.keys()).union(added.keys())
-
-    for name in sorted(all_names):
-        if name in removed and name in added:
-            old_v = removed[name]
-            new_v = added[name]
-            if old_v != new_v:
-                changes.append(
-                    DependencyChange(
-                        name=name,
-                        change_type=_compare_versions(old_v, new_v),
-                        old_version=old_v,
-                        new_version=new_v,
-                        file=file_path,
-                        manager="yarn",
-                    )
-                )
-        elif name in added:
-            changes.append(
-                DependencyChange(
-                    name=name,
-                    change_type="ADDED",
-                    old_version=None,
-                    new_version=added[name],
-                    file=file_path,
-                    manager="yarn",
-                )
-            )
-        elif name in removed:
-            changes.append(
-                DependencyChange(
-                    name=name,
-                    change_type="REMOVED",
-                    old_version=removed[name],
-                    new_version=None,
-                    file=file_path,
-                    manager="yarn",
-                )
-            )
-
-    return changes
+    return _build_changes_from_maps(removed, added, file_path, "yarn")
 
 
 def _parse_pnpm_diff(diff_content: str, file_path: str) -> list[DependencyChange]:
     """Parse pnpm-lock.yaml diffs."""
-    lines = diff_content.splitlines()
-
-    # Matches: /axios@1.2.0: or axios@1.2.0:
     pkg_regex = re.compile(r"^[+-]?\s*['\"]?/?([@a-zA-Z0-9_\-\./]+)@([a-zA-Z0-9_\-\.\+]+)['\"]?:\s*$")
-    # Matches: specifier or inline version
-    simple_regex = re.compile(r"^([+-])\s*([@a-zA-Z0-9_\-\./]+):\s*([0-9\.\w\-]+)")
+    simple_regex = re.compile(r"^([+-])\s*([@a-zA-Z0-9_\-\./]+):\s*([0-9]+\.[0-9]+[^\s,]*)$")
 
     removed: dict[str, str] = {}
     added: dict[str, str] = {}
 
-    for line in lines:
-        if line.startswith("---") or line.startswith("+++"):
+    for line in diff_content.splitlines():
+        if line.startswith(("---", "+++")):
             continue
 
         sign = line[0] if line and line[0] in ("+", "-") else None
@@ -492,91 +352,55 @@ def _parse_pnpm_diff(diff_content: str, file_path: str) -> list[DependencyChange
         s_match = simple_regex.match(line)
         if s_match:
             s_sign, name, ver = s_match.groups()
-            if not name.startswith("lockfileVersion"):
+            if name not in _IGNORED_PNPM_KEYS:
                 if s_sign == "-":
                     removed[name] = ver
                 elif s_sign == "+":
                     added[name] = ver
 
-    changes: list[DependencyChange] = []
-    all_names = set(removed.keys()).union(added.keys())
+    return _build_changes_from_maps(removed, added, file_path, "pnpm")
 
-    for name in sorted(all_names):
-        if name in removed and name in added:
-            old_v = removed[name]
-            new_v = added[name]
-            if old_v != new_v:
-                changes.append(
-                    DependencyChange(
-                        name=name,
-                        change_type=_compare_versions(old_v, new_v),
-                        old_version=old_v,
-                        new_version=new_v,
-                        file=file_path,
-                        manager="pnpm",
-                    )
-                )
-        elif name in added:
-            changes.append(
-                DependencyChange(
-                    name=name,
-                    change_type="ADDED",
-                    old_version=None,
-                    new_version=added[name],
-                    file=file_path,
-                    manager="pnpm",
-                )
-            )
-        elif name in removed:
-            changes.append(
-                DependencyChange(
-                    name=name,
-                    change_type="REMOVED",
-                    old_version=removed[name],
-                    new_version=None,
-                    file=file_path,
-                    manager="pnpm",
-                )
-            )
 
-    return changes
+def _parse_gosum_diff(diff_content: str, file_path: str) -> list[DependencyChange]:
+    """Parse Go `go.sum` dependency deltas."""
+    gosum_re = re.compile(r"^([+-])\s*([^\s]+)\s+(v[^\s/]+?)(?:/go\.mod)?\s+h1:")
+    removed: dict[str, str] = {}
+    added: dict[str, str] = {}
+
+    for line in diff_content.splitlines():
+        m = gosum_re.match(line)
+        if m:
+            sign, mod, ver = m.groups()
+            if sign == "-":
+                removed[mod] = ver
+            elif sign == "+":
+                added[mod] = ver
+
+    return _build_changes_from_maps(removed, added, file_path, "go")
 
 
 def compact_lockfile_diff(file_path: str, diff_content: str) -> list[DependencyChange]:
-    """Extract added, removed, or upgraded dependencies from a lockfile diff.
-
-    Args:
-        file_path: Relative path to the lockfile.
-        diff_content: Raw diff content for this lockfile.
-
-    Returns:
-        List of DependencyChange objects.
-    """
+    """Extract added, removed, or upgraded dependencies from a lockfile diff."""
     manager = detect_package_manager(file_path)
 
-    if manager == "npm":
-        return _parse_npm_diff(diff_content, file_path)
-    elif manager in ("cargo", "poetry", "uv"):
+    if manager in ("npm", "composer"):
+        return _parse_npm_diff(diff_content, file_path, manager=manager)
+    if manager in ("cargo", "poetry", "uv", "pdm"):
         return _parse_toml_lock_diff(diff_content, file_path, manager=manager)
-    elif manager == "yarn":
+    if manager == "yarn":
         return _parse_yarn_diff(diff_content, file_path)
-    elif manager == "pnpm":
+    if manager == "pnpm":
         return _parse_pnpm_diff(diff_content, file_path)
-    elif manager == "pip":
+    if manager == "pip":
         return _parse_requirements_diff(diff_content, file_path)
+    if manager == "go":
+        return _parse_gosum_diff(diff_content, file_path)
 
     return []
 
 
 def format_lockfile_summary(changes: Sequence[DependencyChange]) -> str:
-    """Format dependency changes into a high-signal markdown block for LLM consumption.
-
-    Args:
-        changes: Sequence of DependencyChange objects.
-
-    Returns:
-        Formatted summary markdown string.
-    """
+    """Format dependency changes into a high-signal markdown block for LLM consumption."""
     if not changes:
         return ""
 
@@ -588,14 +412,7 @@ def format_lockfile_summary(changes: Sequence[DependencyChange]) -> str:
 
 
 def strip_lockfiles_and_inject_summary(diff_text: str) -> tuple[str, str, list[DependencyChange]]:
-    """Remove lockfile noise from unified diff and produce a compacted summary.
-
-    Args:
-        diff_text: Full unified git diff.
-
-    Returns:
-        Tuple of (cleaned_diff, compacted_summary_markdown, list_of_changes).
-    """
+    """Remove lockfile noise from unified diff and produce a compacted summary."""
     chunks = split_diff_into_file_chunks(diff_text)
     if not chunks:
         return diff_text, "", []
@@ -605,15 +422,11 @@ def strip_lockfiles_and_inject_summary(diff_text: str) -> tuple[str, str, list[D
 
     for chunk in chunks:
         if is_lockfile(chunk.file_path):
-            changes = compact_lockfile_diff(chunk.file_path, chunk.raw_chunk)
-            all_changes.extend(changes)
+            all_changes.extend(compact_lockfile_diff(chunk.file_path, chunk.raw_chunk))
         else:
             clean_chunks.append(chunk.raw_chunk)
 
-    cleaned_diff = "".join(clean_chunks)
-    summary = format_lockfile_summary(all_changes)
-
-    return cleaned_diff, summary, all_changes
+    return "".join(clean_chunks), format_lockfile_summary(all_changes), all_changes
 
 
 def process_diff_lockfiles(diff_text: str) -> tuple[str, str]:

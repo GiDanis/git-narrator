@@ -1,31 +1,27 @@
-"""Sanitizer: tiered pruning of binary files, minified assets, build dirs, and generated code."""
+"""Sanitizer: tiered pruning, secret scrubbing, and deterministic pre-scan risk checks."""
 
 from __future__ import annotations
 
-import fnmatch
-import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
+import fnmatch
 from pathlib import Path
+import re
+
+from git_narrator.schemas import RiskCategory, RiskRadarItem, RiskSeverity
 
 # Known binary extensions to prune immediately
 BINARY_EXTENSIONS = {
-    # Images
     ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".svgz", ".tiff", ".tif",
-    # Documents / Binaries
     ".pdf", ".wasm", ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".rar", ".iso", ".dmg",
-    # Compiled artifacts
     ".pyc", ".pyo", ".pyd", ".so", ".dylib", ".dll", ".exe", ".bin", ".o", ".a",
-    # Fonts
     ".woff", ".woff2", ".ttf", ".eot", ".otf",
-    # Media
     ".mp3", ".wav", ".ogg", ".flac", ".mp4", ".mov", ".avi", ".mkv", ".webm",
-    # Data / serialized
     ".parquet", ".feather", ".pkl", ".pickle", ".sqlite", ".db", ".class", ".jar", ".war",
+    ".lockb",
 }
 
-# Known minified asset patterns
 MINIFIED_PATTERNS = [
     "*.min.js",
     "*.min.css",
@@ -38,7 +34,6 @@ MINIFIED_PATTERNS = [
     "*-min.css",
 ]
 
-# Build / vendor / cache directory names
 BUILD_DIRECTORIES = {
     "dist",
     "build",
@@ -61,11 +56,8 @@ BUILD_DIRECTORIES = {
     ".terraform",
 }
 
-# Default patterns ignored by git-narrator if not overridden
 DEFAULT_IGNORE_PATTERNS = [
-    # VCS
     ".git/",
-    # Build dirs
     "node_modules/",
     "dist/",
     "build/",
@@ -75,7 +67,6 @@ DEFAULT_IGNORE_PATTERNS = [
     ".turbo/",
     "target/",
     "vendor/",
-    # Python cache & venv
     "__pycache__/",
     "*.pyc",
     ".pytest_cache/",
@@ -84,12 +75,18 @@ DEFAULT_IGNORE_PATTERNS = [
     ".venv/",
     "venv/",
     "env/",
-    # Minified assets & maps
     "*.min.js",
     "*.min.css",
     "*.map",
     "*.bundle.js",
-    # OS / Editor noise
+    ".env",
+    ".env.*",
+    "!.env.example",
+    "!.env.template",
+    "*.pem",
+    "*.key",
+    "*.p12",
+    "*.pfx",
     ".DS_Store",
     "Thumbs.db",
     "*.swp",
@@ -97,7 +94,6 @@ DEFAULT_IGNORE_PATTERNS = [
     "*~",
 ]
 
-# Markers inside code indicating generated content
 GENERATED_CODE_MARKERS = [
     re.compile(r"@generated\b", re.IGNORECASE),
     re.compile(r"AUTO-GENERATED\b", re.IGNORECASE),
@@ -108,8 +104,50 @@ GENERATED_CODE_MARKERS = [
     re.compile(r"GENERATED CODE - DO NOT MODIFY", re.IGNORECASE),
 ]
 
+COMMENT_LINE_PREFIXES = ("//", "#", "/*", "*", "--", "<!--", ";", '"""', "'''")
 
-class PruneReason(str, Enum):
+# High-confidence secret patterns scrubbed before LLM dispatch
+SECRET_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("AWS_ACCESS_KEY", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
+    ("GITHUB_TOKEN", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")),
+    ("ANTHROPIC_KEY", re.compile(r"\bsk-ant-[A-Za-z0-9_-]{20,}\b")),
+    ("OPENAI_KEY", re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b")),
+    ("GOOGLE_API_KEY", re.compile(r"\bAIza[0-9A-Za-z\-_]{30,}\b")),
+    ("STRIPE_KEY", re.compile(r"\b[rs]k_(?:live|test)_[0-9a-zA-Z]{20,}\b")),
+    ("SLACK_TOKEN", re.compile(r"\bxox[baprs]-[0-9A-Za-z-]{10,}\b")),
+    ("JWT_TOKEN", re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b")),
+    (
+        "PRIVATE_KEY",
+        re.compile(r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----"),
+    ),
+    (
+        "DB_CREDENTIAL_URL",
+        re.compile(r"((?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp)://[^:\s/]+:)([^@\s]+)(@)"),
+    ),
+    (
+        "GENERIC_SECRET",
+        re.compile(
+            r"""(?i)((?:password|passwd|secret|api_key|apikey|access_token|auth_token|private_key)\s*[:=]\s*["'])([^"'\s]{8,})(["'])"""
+        ),
+    ),
+]
+
+_PLACEHOLDER_HINTS = (
+    "example",
+    "placeholder",
+    "changeme",
+    "dummy",
+    "your_",
+    "your-",
+    "<your",
+    "${",
+    "xxx",
+    "test_",
+    "redacted",
+)
+
+
+class PruneReason(StrEnum):
     """Reason why a file diff was pruned."""
 
     BINARY = "BINARY"
@@ -119,7 +157,7 @@ class PruneReason(str, Enum):
     GENERATED = "GENERATED"
 
 
-@dataclass
+@dataclass(frozen=True)
 class PrunedFileInfo:
     """Information regarding a pruned file diff."""
 
@@ -128,13 +166,23 @@ class PrunedFileInfo:
     detail: str
 
 
+@dataclass(frozen=True)
+class SecretFinding:
+    """A sensitive token detected and redacted prior to LLM transmission."""
+
+    secret_type: str
+    file_path: str
+    line_preview: str
+
+
 @dataclass
 class SanitizedDiffResult:
-    """Result of diff sanitization."""
+    """Result of diff sanitization and optional secret redaction."""
 
     cleaned_diff: str
     pruned_files: list[PrunedFileInfo] = field(default_factory=list)
     kept_files: list[str] = field(default_factory=list)
+    secret_findings: list[SecretFinding] = field(default_factory=list)
 
     @property
     def total_pruned(self) -> int:
@@ -152,33 +200,29 @@ def _normalize_path(path: str | Path) -> str:
     return p_str.lstrip("/")
 
 
+def _unquote_git_path(raw: str) -> str:
+    """Unquote C-escaped git diff paths if quoted."""
+    s = raw.strip()
+    if len(s) >= 2 and s.startswith('"') and s.endswith('"'):
+        s = s[1:-1]
+        s = (
+            s.replace('\\"', '"')
+            .replace("\\\\", "\\")
+            .replace("\\t", "\t")
+            .replace("\\n", "\n")
+        )
+    return s
+
+
 def is_binary_path(path: str | Path) -> bool:
-    """Check if file extension indicates a binary asset.
-
-    Args:
-        path: Path or filename to check.
-
-    Returns:
-        True if the file matches known binary file extensions.
-    """
-    p = Path(path)
-    return p.suffix.lower() in BINARY_EXTENSIONS
+    """Check if file extension indicates a binary asset."""
+    return Path(path).suffix.lower() in BINARY_EXTENSIONS
 
 
 def is_minified_path(path: str | Path) -> bool:
-    """Check if file matches known minified naming conventions.
-
-    Args:
-        path: Path or filename to check.
-
-    Returns:
-        True if the file matches minified patterns.
-    """
+    """Check if file matches known minified naming conventions."""
     filename = Path(path).name.lower()
-    for pattern in MINIFIED_PATTERNS:
-        if fnmatch.fnmatch(filename, pattern):
-            return True
-    return False
+    return any(fnmatch.fnmatch(filename, pattern) for pattern in MINIFIED_PATTERNS)
 
 
 def is_build_dir_path(path: str | Path) -> bool:
@@ -188,12 +232,7 @@ def is_build_dir_path(path: str | Path) -> bool:
 
 
 def is_minified_content(diff_content: str) -> bool:
-    """Inspect diff content lines to detect minified JS/CSS lines.
-
-    Checks:
-    - Any single line exceeding 1,500 characters.
-    - Or average line length exceeding 250 characters on files with substantial text.
-    """
+    """Inspect diff content lines to detect minified JS/CSS lines."""
     lines = diff_content.splitlines()
     if not lines:
         return False
@@ -208,12 +247,7 @@ def is_minified_content(diff_content: str) -> bool:
             total_len += line_len
             non_empty_count += 1
 
-    if non_empty_count > 5:
-        avg_len = total_len / non_empty_count
-        if avg_len > 300:
-            return True
-
-    return False
+    return bool(non_empty_count > 5 and (total_len / non_empty_count) > 300)
 
 
 class GitIgnorePattern:
@@ -245,37 +279,27 @@ class GitIgnorePattern:
     def matches(self, rel_path: str, is_dir: bool = False) -> bool:
         """Check if relative path matches pattern."""
         if self.dir_only and not is_dir and not rel_path.endswith("/"):
-            # Check if any parent component matches
             parts = rel_path.split("/")
-            for i in range(1, len(parts)):
-                sub = "/".join(parts[:i])
-                if self._match_str(sub):
-                    return True
-            return False
+            return any(self._match_str("/".join(parts[:i])) for i in range(1, len(parts)))
 
         return self._match_str(rel_path)
 
     def _match_str(self, s: str) -> bool:
-        if not self.anchored:
-            # Matches against basename or full string
+        if not self.anchored and "**" not in self.pattern:
             basename = s.split("/")[-1]
-            if fnmatch.fnmatch(basename, self.pattern):
-                return True
-            if fnmatch.fnmatch(s, self.pattern):
-                return True
-            return False
+            return fnmatch.fnmatch(basename, self.pattern) or fnmatch.fnmatch(s, self.pattern)
 
-        # Anchored matching
-        # Convert ** to regex
         pat = self.pattern
         if "**" in pat:
+            # Standard gitignore semantics: '**/' matches zero or more directories
+            escaped = re.escape(pat)
             regex_pat = (
                 "^"
-                + re.escape(pat)
+                + escaped.replace(r"\*\*/", "(?:.+/)?")
                 .replace(r"\*\*", ".*")
                 .replace(r"\*", "[^/]*")
                 .replace(r"\?", "[^/]")
-                + "$"
+                + "(?:/.*)?$"
             )
             return bool(re.match(regex_pat, s))
 
@@ -287,10 +311,8 @@ class IgnoreMatcher:
 
     def __init__(self, patterns: Sequence[str] | None = None):
         self.rules: list[GitIgnorePattern] = []
-        # Add default patterns first
         for pat in DEFAULT_IGNORE_PATTERNS:
             self.add_pattern(pat)
-
         if patterns:
             for pat in patterns:
                 self.add_pattern(pat)
@@ -305,30 +327,17 @@ class IgnoreMatcher:
         """Evaluate path against rules in order (later rules override earlier)."""
         rel_path = _normalize_path(path)
         ignored = False
-
         for rule in self.rules:
             if rule.matches(rel_path):
-                if rule.is_negative:
-                    ignored = False
-                else:
-                    ignored = True
-
+                ignored = not rule.is_negative
         return ignored
 
 
 def load_narratorignore(repo_root: Path | str) -> list[str]:
-    """Load ignore patterns from `.narratorignore` file in repository root if present.
-
-    Args:
-        repo_root: Root path of the repository.
-
-    Returns:
-        List of pattern strings.
-    """
+    """Load ignore patterns from `.narratorignore` file in repository root if present."""
     path = Path(repo_root) / ".narratorignore"
     if not path.is_file():
         return []
-
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         return [line.strip() for line in lines if line.strip() and not line.strip().startswith("#")]
@@ -337,11 +346,7 @@ def load_narratorignore(repo_root: Path | str) -> list[str]:
 
 
 def parse_gitattributes(repo_root: Path | str) -> dict[str, dict[str, str]]:
-    """Parse `.gitattributes` to locate custom diff / generated attributes.
-
-    Returns:
-        Dict mapping pattern -> dict of attributes (e.g. {'linguist-generated': 'true'}).
-    """
+    """Parse `.gitattributes` to locate custom diff / generated attributes."""
     path = Path(repo_root) / ".gitattributes"
     if not path.is_file():
         return {}
@@ -349,11 +354,11 @@ def parse_gitattributes(repo_root: Path | str) -> dict[str, dict[str, str]]:
     mapping: dict[str, dict[str, str]] = {}
     try:
         content = path.read_text(encoding="utf-8", errors="replace")
-        for line in content.splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
+        for raw_line in content.splitlines():
+            stripped = raw_line.strip()
+            if not stripped or stripped.startswith("#"):
                 continue
-            parts = line.split()
+            parts = stripped.split()
             if len(parts) >= 2:
                 pattern = parts[0]
                 attrs: dict[str, str] = {}
@@ -373,8 +378,7 @@ def parse_gitattributes(repo_root: Path | str) -> dict[str, dict[str, str]]:
 
 def is_ignored_path(path: str | Path, ignore_patterns: Sequence[str] | None = None) -> bool:
     """Check if path is matched by custom or default ignore rules."""
-    matcher = IgnoreMatcher(ignore_patterns)
-    return matcher.is_ignored(path)
+    return IgnoreMatcher(ignore_patterns).is_ignored(path)
 
 
 def is_generated_content(
@@ -382,19 +386,9 @@ def is_generated_content(
     content_or_diff: str,
     gitattributes: dict[str, dict[str, str]] | None = None,
 ) -> bool:
-    """Detect if file is generated via .gitattributes or code header markers.
-
-    Args:
-        file_path: Path of the file.
-        content_or_diff: File diff or source content.
-        gitattributes: Parsed .gitattributes mapping if available.
-
-    Returns:
-        True if generated, False otherwise.
-    """
+    """Detect if file is generated via .gitattributes or header comment markers."""
     rel_path = _normalize_path(file_path)
 
-    # Check gitattributes
     if gitattributes:
         for pattern, attrs in gitattributes.items():
             if fnmatch.fnmatch(rel_path, pattern) or fnmatch.fnmatch(Path(rel_path).name, pattern):
@@ -403,16 +397,126 @@ def is_generated_content(
                 if attrs.get("diff") == "false":
                     return True
 
-    # Check diff content markers (examine first 30 lines)
-    lines = content_or_diff.splitlines()[:30]
-    for line in lines:
-        # Strip diff prefixes '+' or '-'
-        clean = line.lstrip("+- ")
+    # Inspect only comment-formatted lines inside the first 30 lines to avoid false positives on code/regexes
+    for line in content_or_diff.splitlines()[:30]:
+        if line.startswith(("diff --git ", "--- ", "+++ ", "@@ ", "index ")):
+            continue
+        clean = line[1:].lstrip() if line.startswith(("+", "-", " ")) else line.lstrip()
+        if not clean.startswith(COMMENT_LINE_PREFIXES):
+            continue
         for marker in GENERATED_CODE_MARKERS:
             if marker.search(clean):
                 return True
 
     return False
+
+
+def redact_secrets(chunk_text: str, file_path: str = "") -> tuple[str, list[SecretFinding]]:
+    """Scrub secrets from diff content lines and return redacted text + findings."""
+    findings: list[SecretFinding] = []
+    out_lines: list[str] = []
+
+    for line in chunk_text.splitlines(keepends=True):
+        if line.startswith(("diff --git ", "index ", "--- ", "+++ ", "@@ ")):
+            out_lines.append(line)
+            continue
+
+        updated = line
+        for kind, pattern in SECRET_PATTERNS:
+            if kind == "DB_CREDENTIAL_URL":
+                def _db_sub(m: re.Match[str], st: str = kind) -> str:
+                    findings.append(SecretFinding(st, file_path, f"{m.group(1)}[REDACTED]{m.group(3)}"))
+                    return f"{m.group(1)}[REDACTED:{st}]{m.group(3)}"
+
+                updated = pattern.sub(_db_sub, updated)
+            elif kind == "GENERIC_SECRET":
+                def _gen_sub(m: re.Match[str], st: str = kind) -> str:
+                    val = m.group(2)
+                    lower_val = val.lower()
+                    if any(hint in lower_val for hint in _PLACEHOLDER_HINTS):
+                        return m.group(0)
+                    findings.append(SecretFinding(st, file_path, f"{m.group(1)}[REDACTED]{m.group(3)}"))
+                    return f"{m.group(1)}[REDACTED:{st}]{m.group(3)}"
+
+                updated = pattern.sub(_gen_sub, updated)
+            else:
+                def _tok_sub(m: re.Match[str], st: str = kind) -> str:
+                    token = m.group(0)
+                    preview = f"{token[:6]}...{token[-4:]}" if len(token) > 12 else "[REDACTED]"
+                    findings.append(SecretFinding(st, file_path, preview))
+                    return f"[REDACTED:{st}]"
+
+                updated = pattern.sub(_tok_sub, updated)
+
+        out_lines.append(updated)
+
+    return "".join(out_lines), findings
+
+
+def scan_deterministic_risks(
+    diff_text: str,
+    secret_findings: Sequence[SecretFinding] | None = None,
+) -> list[RiskRadarItem]:
+    """Run zero-cost deterministic safety checks on diff before or alongside LLM analysis."""
+    risks: list[RiskRadarItem] = []
+
+    seen_secrets: set[tuple[str, str]] = set()
+    for finding in secret_findings or ():
+        key = (finding.secret_type, finding.file_path)
+        if key in seen_secrets:
+            continue
+        seen_secrets.add(key)
+        risks.append(
+            RiskRadarItem(
+                category=RiskCategory.SECURITY_LEAK,
+                severity=RiskSeverity.CRITICAL,
+                title=f"Hardcoded {finding.secret_type} scrubbed prior to LLM dispatch",
+                file_path=finding.file_path or None,
+                line_hint=None,
+                explanation=(
+                    f"Detected sensitive pattern ({finding.line_preview}) in changeset. "
+                    "It was automatically redacted before sending to the AI provider."
+                ),
+                remediation="Remove the credential from version control, load via environment/secret manager, and rotate the exposed secret.",
+            )
+        )
+
+    chunks = split_diff_into_file_chunks(diff_text)
+    conflict_re = re.compile(r"^\+(?:<{7}\s|>{7}\s|={7}$)")
+    debugger_re = re.compile(r"^\+\s*(?:import\s+pdb|pdb\.set_trace\(\)|breakpoint\(\)|debugger;?)\s*$")
+
+    for chunk in chunks:
+        has_conflict = False
+        has_debugger = False
+        for line in chunk.raw_chunk.splitlines():
+            if not has_conflict and conflict_re.match(line):
+                has_conflict = True
+                risks.append(
+                    RiskRadarItem(
+                        category=RiskCategory.CONTRACT_BREAK,
+                        severity=RiskSeverity.CRITICAL,
+                        title="Unresolved Git merge conflict markers detected",
+                        file_path=chunk.file_path,
+                        line_hint=None,
+                        explanation="Diff adds raw `<<<<<<<` / `=======` / `>>>>>>>` conflict delimiters that will break parsing/execution.",
+                        remediation="Resolve the merge conflict manually and re-test before committing.",
+                    )
+                )
+            elif not has_debugger and debugger_re.match(line):
+                has_debugger = True
+                risks.append(
+                    RiskRadarItem(
+                        category=RiskCategory.PERFORMANCE_REGRESSION,
+                        severity=RiskSeverity.HIGH,
+                        title="Debug breakpoint statement left in diff",
+                        file_path=chunk.file_path,
+                        line_hint=None,
+                        explanation="Added breakpoint()/pdb/debugger call can hang worker threads or halt execution in production.",
+                        remediation="Remove the interactive debugger statement before merging.",
+                    )
+                )
+
+    return risks
 
 
 @dataclass
@@ -425,23 +529,50 @@ class FileDiffChunk:
     is_binary: bool = False
 
 
+def _parse_diff_header_paths(chunk_str: str) -> tuple[str, str | None]:
+    """Extract target and old file paths handling quotes, spaces, and /dev/null."""
+    lines = chunk_str.splitlines()[:6]
+    first_line = lines[0] if lines else ""
+
+    # Standard or quoted: diff --git a/path b/path OR diff --git "a/my path" "b/my path"
+    file_match = re.match(
+        r'^diff --git (?:"(?:[aicwo]/)?(?P<q_old>.*?)"|(?:[aicwo]/)?(?P<old>\S+)) '
+        r'(?:"(?:[bicwo]/)?(?P<q_new>.*?)"|(?:[bicwo]/)?(?P<new>\S+))$',
+        first_line,
+    )
+    old_p: str | None = None
+    new_p: str | None = None
+
+    if file_match:
+        old_p = _unquote_git_path(file_match.group("q_old") or file_match.group("old") or "")
+        new_p = _unquote_git_path(file_match.group("q_new") or file_match.group("new") or "")
+
+    # Prefer +++ / --- headers when /dev/null or fallback needed
+    for hdr_line in lines[1:]:
+        if hdr_line.startswith("--- ") and not old_p:
+            candidate = _unquote_git_path(hdr_line[4:]).removeprefix("a/")
+            if candidate != "/dev/null":
+                old_p = candidate
+        elif hdr_line.startswith("+++ "):
+            candidate = _unquote_git_path(hdr_line[4:])
+            if candidate == "/dev/null":
+                new_p = old_p
+            elif not new_p or new_p == "unknown":
+                new_p = re.sub(r"^[bicwo]/", "", candidate)
+
+    target_path = new_p if new_p and new_p != "/dev/null" else (old_p or "unknown")
+    resolved_old = old_p if old_p and old_p != target_path else None
+    return target_path, resolved_old
+
+
 def split_diff_into_file_chunks(diff_text: str) -> list[FileDiffChunk]:
-    """Split unified diff text into individual per-file chunks.
-
-    Args:
-        diff_text: Full unified git diff.
-
-    Returns:
-        List of FileDiffChunk instances.
-    """
+    """Split unified diff text into individual per-file chunks."""
     chunks: list[FileDiffChunk] = []
     if not diff_text or not diff_text.strip():
         return chunks
 
-    # Git diff file boundaries start with 'diff --git '
     pattern = re.compile(r"^diff --git ", re.MULTILINE)
     matches = list(pattern.finditer(diff_text))
-
     if not matches:
         return chunks
 
@@ -449,21 +580,7 @@ def split_diff_into_file_chunks(diff_text: str) -> list[FileDiffChunk]:
         start = match.start()
         end = matches[i + 1].start() if i + 1 < len(matches) else len(diff_text)
         chunk_str = diff_text[start:end]
-
-        # Extract file paths from 'diff --git a/... b/...'
-        first_line = chunk_str.split("\n", 1)[0]
-        # Regex to extract a/... and b/...
-        file_match = re.search(r"^diff --git a/(.*?) b/(.*?)$", first_line)
-        if file_match:
-            old_p, new_p = file_match.groups()
-            # If deleted, new_p may still be named or marked in +++ /dev/null
-            target_path = new_p if new_p != "/dev/null" else old_p
-            old_path = old_p if old_p != target_path else None
-        else:
-            # Fallback path extraction
-            target_path = "unknown"
-            old_path = None
-
+        target_path, old_path = _parse_diff_header_paths(chunk_str)
         is_binary = "Binary files " in chunk_str or "GIT binary patch" in chunk_str
 
         chunks.append(
@@ -482,28 +599,12 @@ def sanitize_diff(
     diff_text: str,
     repo_root: Path | str | None = None,
     custom_ignore_patterns: Sequence[str] | None = None,
+    redact_secrets_enabled: bool = True,
 ) -> SanitizedDiffResult:
-    """Sanitize unified diff by applying tiered pruning.
-
-    Pruning tiers:
-    1. Binary files (marked by git or known extensions).
-    2. Minified assets (*.min.js, *.min.css, *.map, or extreme line length).
-    3. Build directories (dist/, build/, out/, node_modules/, .next/, etc.).
-    4. .narratorignore pattern matching.
-    5. Generated code (.gitattributes or header markers).
-
-    Args:
-        diff_text: Raw unified diff string.
-        repo_root: Repository root path to load `.narratorignore` and `.gitattributes`.
-        custom_ignore_patterns: Explicit additional ignore patterns.
-
-    Returns:
-        SanitizedDiffResult with cleaned diff, pruned files, and kept files.
-    """
+    """Sanitize unified diff via tiered pruning and secret redaction."""
     if not diff_text or not diff_text.strip():
         return SanitizedDiffResult(cleaned_diff="", pruned_files=[], kept_files=[])
 
-    # Load ignore rules
     patterns: list[str] = []
     gitattributes: dict[str, dict[str, str]] = {}
     if repo_root:
@@ -519,11 +620,11 @@ def sanitize_diff(
     pruned: list[PrunedFileInfo] = []
     kept_chunks: list[str] = []
     kept_files: list[str] = []
+    all_secrets: list[SecretFinding] = []
 
     for chunk in file_chunks:
         fpath = chunk.file_path
 
-        # Tier 1: Binary files
         if chunk.is_binary or is_binary_path(fpath):
             pruned.append(
                 PrunedFileInfo(
@@ -534,7 +635,6 @@ def sanitize_diff(
             )
             continue
 
-        # Tier 2: Build / Dependency directories
         if is_build_dir_path(fpath):
             pruned.append(
                 PrunedFileInfo(
@@ -545,28 +645,16 @@ def sanitize_diff(
             )
             continue
 
-        # Tier 3: Minified assets
-        if is_minified_path(fpath):
+        if is_minified_path(fpath) or is_minified_content(chunk.raw_chunk):
             pruned.append(
                 PrunedFileInfo(
                     path=fpath,
                     reason=PruneReason.MINIFIED,
-                    detail="Minified asset naming pattern (*.min.*, *.map, *.bundle.js)",
+                    detail="Minified asset detected via naming pattern or line-length heuristics",
                 )
             )
             continue
 
-        if is_minified_content(chunk.raw_chunk):
-            pruned.append(
-                PrunedFileInfo(
-                    path=fpath,
-                    reason=PruneReason.MINIFIED,
-                    detail="Minified code detected via line-length heuristics",
-                )
-            )
-            continue
-
-        # Tier 4: Ignore rules (.narratorignore / default ignore list)
         if ignore_matcher.is_ignored(fpath):
             pruned.append(
                 PrunedFileInfo(
@@ -577,24 +665,27 @@ def sanitize_diff(
             )
             continue
 
-        # Tier 5: Generated code
         if is_generated_content(fpath, chunk.raw_chunk, gitattributes):
             pruned.append(
                 PrunedFileInfo(
                     path=fpath,
                     reason=PruneReason.GENERATED,
-                    detail="Identified as generated code via .gitattributes or source header markers",
+                    detail="Identified as generated code via .gitattributes or header markers",
                 )
             )
             continue
 
-        # Passed all filters
-        kept_files.append(fpath)
-        kept_chunks.append(chunk.raw_chunk)
+        chunk_payload = chunk.raw_chunk
+        if redact_secrets_enabled:
+            chunk_payload, chunk_secrets = redact_secrets(chunk_payload, file_path=fpath)
+            all_secrets.extend(chunk_secrets)
 
-    cleaned_diff = "".join(kept_chunks)
+        kept_files.append(fpath)
+        kept_chunks.append(chunk_payload)
+
     return SanitizedDiffResult(
-        cleaned_diff=cleaned_diff,
+        cleaned_diff="".join(kept_chunks),
         pruned_files=pruned,
         kept_files=kept_files,
+        secret_findings=all_secrets,
     )

@@ -8,7 +8,11 @@ from typing import Any
 from pydantic import ValidationError
 
 from git_narrator.schemas import (
+    ComponentMutation,
     GitNarratorReport,
+    RiskRadarItem,
+    VisualFlow,
+    infer_blast_radius,
 )
 
 logger = logging.getLogger(__name__)
@@ -19,18 +23,59 @@ class JSONParseError(Exception):
 
 
 def extract_code_fences(text: str) -> list[str]:
-    """Tier 2: Extract text inside markdown code fences."""
+    """Tier 2: Extract JSON candidates from markdown code fences."""
+    candidates: list[str] = []
+
+    # First check an outer ```json ... ``` fence wrapping the entire response (resilient to ``` inside strings)
+    outer_match = re.search(r"```(?:json)?\s*\n([\s\S]*)\n\s*```\s*$", text.strip(), re.IGNORECASE)
+    if outer_match:
+        inner = outer_match.group(1).strip()
+        if inner.startswith("{"):
+            candidates.append(inner)
+
     pattern = r"```(?:json)?\s*([\s\S]*?)\s*```"
     matches = re.findall(pattern, text, re.IGNORECASE)
-    return [m.strip() for m in matches if m.strip()]
+    for m in matches:
+        stripped = m.strip()
+        if stripped and stripped not in candidates:
+            candidates.append(stripped)
+
+    return candidates
 
 
 def extract_balanced_braces(text: str) -> str | None:
-    """Tier 3: Extract candidate JSON object from first '{' to last '}'."""
-    first_brace = text.find("{")
+    """Tier 3: Extract the first top-level balanced JSON object while respecting strings."""
+    start = text.find("{")
+    if start == -1:
+        return None
+
+    depth = 0
+    in_string = False
+    escape = False
+
+    for idx in range(start, len(text)):
+        ch = text[idx]
+        if escape:
+            escape = False
+            continue
+        if ch == "\\" and in_string:
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if not in_string:
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start : idx + 1].strip()
+
+    # Fallback to outermost braces if balanced scan did not close cleanly
     last_brace = text.rfind("}")
-    if first_brace != -1 and last_brace > first_brace:
-        return text[first_brace : last_brace + 1].strip()
+    if last_brace > start:
+        return text[start : last_brace + 1].strip()
     return None
 
 
@@ -38,7 +83,8 @@ def repair_truncated_json(text: str) -> str:
     """Tier 4: Auto-repair truncated JSON string using stack & heuristic auto-closing.
 
     Handles:
-    - Unclosed strings
+    - Unclosed strings and trailing escapes
+    - Partial literals (true, false, null) and incomplete numbers
     - Dangling commas and colons
     - Unclosed brackets '[' and braces '{'
     - Dangling object keys
@@ -65,12 +111,8 @@ def repair_truncated_json(text: str) -> str:
         if not in_string:
             if ch in "{[":
                 stack.append(ch)
-            elif ch == "}":
-                if stack and stack[-1] == "{":
-                    stack.pop()
-            elif ch == "]":
-                if stack and stack[-1] == "[":
-                    stack.pop()
+            elif (ch == "}" and stack and stack[-1] == "{") or (ch == "]" and stack and stack[-1] == "["):
+                stack.pop()
 
     # If truncated mid-escape
     if escape:
@@ -81,6 +123,11 @@ def repair_truncated_json(text: str) -> str:
         s += '"'
 
     s = s.rstrip()
+
+    # If truncated inside a bare literal (e.g., ': tru', ': nul', ': fal') or trailing dot/minus
+    partial_literal = re.search(r"([:\[,]\s*)(tr?u?e?|fa?l?s?e?|nu?l?l?|-|\d+\.)$", s)
+    if partial_literal and not re.search(r"^(true|false|null|\d+)$", partial_literal.group(2)):
+        s = s[: partial_literal.start(2)] + "null"
 
     # If ended with a dangling key like: "key" without colon inside an object
     if stack and stack[-1] == "{" and re.search(r'([,{]\s*"[^"]+")\s*$', s):
@@ -116,13 +163,6 @@ def parse_narrator_json(raw_text: str) -> tuple[dict[str, Any], int]:
 
     Returns:
         tuple[dict, tier_used]: Parsed dictionary and the tier number (1-5) used.
-
-    Tiers:
-        1. Direct json.loads
-        2. Markdown code fences stripping (```json ... ```)
-        3. Balanced brace extraction (first '{' to last '}')
-        4. Truncated JSON heuristic repair (stack-based auto-closing)
-        5. Fallback dictionary synthesized from raw text
     """
     cleaned = raw_text.strip()
     if not cleaned:
@@ -158,10 +198,7 @@ def parse_narrator_json(raw_text: str) -> tuple[dict[str, Any], int]:
             pass
 
     # Tier 4: Truncated JSON repair
-    # Try repairing the raw_text directly or the first candidate found inside code fences
-    candidates_to_repair = [raw_text]
-    if code_blocks:
-        candidates_to_repair.extend(code_blocks)
+    candidates_to_repair = [raw_text, *code_blocks]
     if candidate:
         candidates_to_repair.append(candidate)
 
@@ -171,8 +208,8 @@ def parse_narrator_json(raw_text: str) -> tuple[dict[str, Any], int]:
             data = json.loads(repaired_str)
             if isinstance(data, dict):
                 return data, 4
-        except Exception:
-            continue
+        except (JSONParseError, json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+            logger.debug("Tier 4 JSON repair candidate failed: %s", exc)
 
     # Tier 5: Fallback gracefully to raw text extraction
     logger.warning("All JSON parsing tiers failed; synthesizing Tier 5 fallback report.")
@@ -190,13 +227,14 @@ def extract_conventional_commit(text: str) -> str:
 
 def build_fallback_dict(raw_text: str) -> dict[str, Any]:
     """Tier 5: Synthesize a structural dictionary from raw/unparseable text."""
-    lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+    lines = [
+        line.strip()
+        for line in raw_text.splitlines()
+        if line.strip() and not line.strip().startswith("```")
+    ]
     first_line = lines[0] if lines else "Architectural analysis summary"
     headline = first_line[:120]
-
     commit = extract_conventional_commit(raw_text)
-
-    # Excerpt body for narrative
     body_excerpt = "\n".join(lines[:15]) if lines else "No detailed text available."
 
     return {
@@ -204,6 +242,7 @@ def build_fallback_dict(raw_text: str) -> dict[str, Any]:
             "headline": headline,
             "intent": "Automated architectural recovery from unstructured LLM output.",
             "overall_impact": "Changes detected; please verify details against the source diff.",
+            "blast_radius": "MEDIUM",
             "tags": ["auto-recovery", "unstructured-output"],
         },
         "architecture_narrative": {
@@ -225,8 +264,24 @@ def build_fallback_dict(raw_text: str) -> dict[str, Any]:
     }
 
 
+def _coerce_valid_items(raw_items: Any, model_cls: type[RiskRadarItem] | type[ComponentMutation]) -> list[dict[str, Any]]:
+    """Validate list entries individually so one malformed entry never nukes the whole list."""
+    if not isinstance(raw_items, list):
+        return []
+    valid: list[dict[str, Any]] = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        try:
+            validated = model_cls.model_validate(item)
+            valid.append(validated.model_dump())
+        except ValidationError:
+            continue
+    return valid
+
+
 def coerce_report_dict(data: dict[str, Any], raw_text: str) -> dict[str, Any]:
-    """Ensure all required fields for GitNarratorReport exist in the dictionary."""
+    """Ensure all required fields for GitNarratorReport exist and invalid nested items are cleaned."""
     fallback = build_fallback_dict(raw_text)
 
     # Executive summary
@@ -237,8 +292,12 @@ def coerce_report_dict(data: dict[str, Any], raw_text: str) -> dict[str, Any]:
         for k in ("headline", "intent", "overall_impact"):
             if not exec_summary.get(k):
                 exec_summary[k] = fallback["executive_summary"][k]
+        if not exec_summary.get("blast_radius"):
+            exec_summary["blast_radius"] = infer_blast_radius(str(exec_summary["overall_impact"])).value
         if not isinstance(exec_summary.get("tags"), list):
             exec_summary["tags"] = []
+        else:
+            exec_summary["tags"] = [str(t) for t in exec_summary["tags"] if t]
 
     # Architecture narrative
     arch_narrative = data.get("architecture_narrative")
@@ -248,22 +307,32 @@ def coerce_report_dict(data: dict[str, Any], raw_text: str) -> dict[str, Any]:
         for k in ("before_state", "after_state", "tech_debt"):
             if not arch_narrative.get(k):
                 arch_narrative[k] = fallback["architecture_narrative"][k]
-        if not isinstance(arch_narrative.get("components_affected"), list):
-            arch_narrative["components_affected"] = []
+        arch_narrative["components_affected"] = _coerce_valid_items(
+            arch_narrative.get("components_affected"), ComponentMutation
+        )
+
+    # Visual flow
+    vf = data.get("visual_flow")
+    if isinstance(vf, dict):
+        try:
+            data["visual_flow"] = VisualFlow.model_validate(vf).model_dump()
+        except ValidationError:
+            data["visual_flow"] = None
+    elif vf is not None:
+        data["visual_flow"] = None
 
     # Review checklist
     review_checklist = data.get("review_checklist")
     if not isinstance(review_checklist, dict):
         data["review_checklist"] = fallback["review_checklist"]
     else:
-        if not isinstance(review_checklist.get("manual_checks"), list):
-            review_checklist["manual_checks"] = []
-        if not isinstance(review_checklist.get("breaking_changes"), list):
-            review_checklist["breaking_changes"] = []
+        checks = review_checklist.get("manual_checks")
+        breaks = review_checklist.get("breaking_changes")
+        review_checklist["manual_checks"] = [str(x) for x in checks] if isinstance(checks, list) else []
+        review_checklist["breaking_changes"] = [str(x) for x in breaks] if isinstance(breaks, list) else []
 
-    # Risk radar
-    if not isinstance(data.get("risk_radar"), list):
-        data["risk_radar"] = []
+    # Risk radar — validate item-by-item so 1 bad entry doesn't discard the entire report
+    data["risk_radar"] = _coerce_valid_items(data.get("risk_radar"), RiskRadarItem)
 
     # Conventional commit
     if not data.get("conventional_commit") or not isinstance(data.get("conventional_commit"), str):

@@ -62,10 +62,9 @@ def test_score_hunk_formula():
     w_type = 1.0
     additions = 10
     deletions = 5
-    delta = additions + deletions  # 15
 
     # Without interface signature: C_interface = 1.0
-    expected_score = 1.0 * (1.0 + math.log1p(15)) * 1.0
+    expected_score = 1.0 * (1.0 + math.log1p(additions + deletions)) * 1.0
     calculated = score_hunk(additions, deletions, w_type, has_signature=False)
     assert math.isclose(calculated, expected_score, rel_tol=1e-5)
 
@@ -112,7 +111,8 @@ def test_compress_hunk_context():
 
     compressed = compress_hunk_context(hunk)
     assert compressed.is_compressed is True
-    # Should only keep 1 context line before (' ctx3') and 1 context line after (' ctx4')
+    # Two leading context lines (' ctx1', ' ctx2') trimmed -> starts shift +2; 3 old lines, 3 new lines remain
+    assert compressed.header == "@@ -12,3 +12,3 @@ def foo():"
     assert compressed.lines == [
         " ctx3",
         "-old_line",

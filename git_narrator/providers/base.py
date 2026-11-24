@@ -2,7 +2,7 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Self
 
 import httpx
 from pydantic import BaseModel
@@ -27,6 +27,8 @@ def resolve_schema_dict(
 
 class BaseLLMProvider(ABC):
     """Abstract base class for all LLM provider drivers."""
+
+    supports_native_schema: bool = True
 
     def __init__(
         self,
@@ -58,29 +60,20 @@ class BaseLLMProvider(ABC):
             await self._owned_client.aclose()
             self._owned_client = None
 
-    async def __aenter__(self) -> "BaseLLMProvider":
+    async def __aenter__(self) -> Self:
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+    async def __aexit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
         await self.close()
 
     @abstractmethod
-    async def stream_structured(
+    def stream_structured(
         self,
         system_prompt: str,
         user_prompt: str,
         json_schema: dict[str, Any] | type[BaseModel] | None = None,
     ) -> AsyncIterator[str]:
-        """Stream structured JSON chunks from the LLM provider.
-
-        Args:
-            system_prompt: The system prompt defining the persona and instructions.
-            user_prompt: The user prompt containing the diff, stat, and context.
-            json_schema: The target schema (dict or Pydantic model). Defaults to GitNarratorReport.
-
-        Yields:
-            Streaming string chunks of the output.
-        """
+        """Return an async iterator yielding structured JSON string chunks."""
         ...
 
     async def generate_report(

@@ -1,7 +1,8 @@
-"""Provider drivers for git-narrator."""
+"""Provider drivers and unified factory for git-narrator."""
 
-from typing import Any, Optional
+from typing import Any
 
+from git_narrator.config import PROVIDER_SPECS, normalize_provider_name
 from git_narrator.providers.anthropic import AnthropicProvider
 from git_narrator.providers.base import BaseLLMProvider
 from git_narrator.providers.gemini import GeminiProvider
@@ -25,62 +26,45 @@ def create_provider(
     base_url: str | None = None,
     **kwargs: Any,
 ) -> BaseLLMProvider:
-    """Factory to instantiate the appropriate LLM provider.
+    """Instantiate the appropriate LLM provider driver using canonical PROVIDER_SPECS."""
+    canonical = normalize_provider_name(provider_name)
+    spec = PROVIDER_SPECS.get(canonical)
 
-    Args:
-        provider_name: One of 'ollama', 'gemini', 'openai', 'anthropic', 'groq', 'deepseek', 'openrouter'.
-        model: Optional model name override.
-        api_key: Optional API key.
-        base_url: Optional custom base URL.
-        **kwargs: Additional provider-specific kwargs.
+    if spec is None and canonical != "vllm":
+        supported = ", ".join(PROVIDER_SPECS.keys())
+        raise ValueError(
+            f"Unknown provider '{provider_name}'. Supported providers: {supported}, vllm."
+        )
 
-    Returns:
-        Instantiated BaseLLMProvider subclass.
-    """
-    normalized = provider_name.strip().lower()
+    effective_model = model or (spec.default_model if spec else "gpt-4.1-mini")
+    effective_base_url = base_url or (spec.default_base_url if spec else "https://api.openai.com/v1")
 
-    if normalized == "ollama":
+    if canonical == "ollama":
         return OllamaProvider(
-            model=model or "llama3.2",
-            base_url=base_url,
+            model=effective_model,
+            base_url=effective_base_url,
             **kwargs,
         )
-    elif normalized in ("gemini", "google"):
+    if canonical == "gemini":
         return GeminiProvider(
-            model=model or "gemini-1.5-flash",
-            api_key=api_key,
-            base_url=base_url,
-            **kwargs,
-        )
-    elif normalized in ("openai", "groq", "deepseek", "openrouter", "vllm"):
-        default_base_urls = {
-            "openai": "https://api.openai.com/v1",
-            "groq": "https://api.groq.com/openai/v1",
-            "deepseek": "https://api.deepseek.com/v1",
-            "openrouter": "https://openrouter.ai/api/v1",
-        }
-        effective_base_url = base_url or default_base_urls.get(normalized, "https://api.openai.com/v1")
-        default_models = {
-            "openai": "gpt-4o",
-            "groq": "llama-3.3-70b-versatile",
-            "deepseek": "deepseek-chat",
-            "openrouter": "anthropic/claude-3.5-sonnet",
-        }
-        effective_model = model or default_models.get(normalized, "gpt-4o")
-        return OpenAIProvider(
             model=effective_model,
             api_key=api_key,
             base_url=effective_base_url,
             **kwargs,
         )
-    elif normalized in ("anthropic", "claude"):
+    if canonical == "anthropic":
         return AnthropicProvider(
-            model=model or "claude-3-5-sonnet-20241022",
+            model=effective_model,
             api_key=api_key,
-            base_url=base_url,
+            base_url=effective_base_url,
             **kwargs,
         )
-    else:
-        raise ValueError(
-            f"Unknown provider '{provider_name}'. Supported providers: ollama, gemini, openai, groq, deepseek, openrouter, anthropic."
-        )
+
+    use_json_object = kwargs.pop("use_json_object", spec.use_json_object if spec else False)
+    return OpenAIProvider(
+        model=effective_model,
+        api_key=api_key,
+        base_url=effective_base_url,
+        use_json_object=use_json_object,
+        **kwargs,
+    )

@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import difflib
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from functools import lru_cache
+from pathlib import Path
 import re
 import shutil
 import subprocess
-from collections.abc import Sequence
-from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Literal
+
+HOOK_MARKER = "# git-narrator-managed-hook"
 
 
 class GitError(Exception):
@@ -83,32 +87,24 @@ class ChangeScope:
     commit_info: CommitInfo | None = None
 
 
+@lru_cache(maxsize=1)
+def _find_git_binary() -> str:
+    """Locate git executable once per process."""
+    git_bin = shutil.which("git")
+    if not git_bin:
+        raise GitNotFoundError("git executable not found in system PATH.")
+    return git_bin
+
+
 def run_git(
     args: Sequence[str],
     cwd: Path | str | None = None,
     timeout: float = 15.0,
     check: bool = False,
 ) -> subprocess.CompletedProcess[str]:
-    """Execute a git command with fast subprocess execution.
-
-    Args:
-        args: Sequence of git arguments (without 'git' prefix).
-        cwd: Directory where the command should be run.
-        timeout: Execution timeout in seconds.
-        check: Whether to raise GitCommandError if returncode != 0.
-
-    Returns:
-        CompletedProcess with decoded stdout and stderr.
-
-    Raises:
-        GitNotFoundError: If git binary is missing from PATH.
-        GitCommandError: If command fails and check=True.
-    """
-    git_bin = shutil.which("git")
-    if not git_bin:
-        raise GitNotFoundError("git executable not found in system PATH.")
-
-    cmd = [git_bin, "--no-pager"] + list(args)
+    """Execute a git command with fast subprocess execution."""
+    git_bin = _find_git_binary()
+    cmd = [git_bin, "--no-pager", *args]
 
     try:
         proc = subprocess.run(
@@ -119,6 +115,7 @@ def run_git(
             encoding="utf-8",
             errors="replace",
             timeout=timeout,
+            check=False,
         )
     except subprocess.TimeoutExpired as exc:
         raise GitError(f"Git command timed out after {timeout}s: {' '.join(cmd)}") from exc
@@ -137,30 +134,13 @@ def run_git(
 
 
 def is_git_repo(repo_path: Path | str = ".") -> bool:
-    """Check if the provided directory is inside a git working tree.
-
-    Args:
-        repo_path: Path to inspect.
-
-    Returns:
-        True if inside a git repository, False otherwise.
-    """
+    """Check if the provided directory is inside a git working tree."""
     proc = run_git(["rev-parse", "--is-inside-work-tree"], cwd=repo_path)
     return proc.returncode == 0 and proc.stdout.strip() == "true"
 
 
 def get_repo_root(repo_path: Path | str = ".") -> Path:
-    """Get the absolute root directory of the git repository.
-
-    Args:
-        repo_path: Directory inside the repository.
-
-    Returns:
-        Path to the repository root.
-
-    Raises:
-        GitError: If not inside a git repository.
-    """
+    """Get the absolute root directory of the git repository."""
     proc = run_git(["rev-parse", "--show-toplevel"], cwd=repo_path)
     if proc.returncode != 0:
         raise GitError(f"Not a git repository: {repo_path}")
@@ -168,20 +148,12 @@ def get_repo_root(repo_path: Path | str = ".") -> Path:
 
 
 def get_current_branch(repo_path: Path | str = ".") -> str:
-    """Get current branch name or short commit SHA if in detached HEAD state.
-
-    Args:
-        repo_path: Repository path.
-
-    Returns:
-        Branch name or detached head identifier.
-    """
+    """Get current branch name or short commit SHA if in detached HEAD state."""
     proc = run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_path)
     if proc.returncode != 0:
         return "HEAD"
     branch = proc.stdout.strip()
     if branch == "HEAD":
-        # Detached HEAD, obtain short SHA
         short_sha_proc = run_git(["rev-parse", "--short", "HEAD"], cwd=repo_path)
         if short_sha_proc.returncode == 0:
             return f"HEAD (detached at {short_sha_proc.stdout.strip()})"
@@ -189,20 +161,7 @@ def get_current_branch(repo_path: Path | str = ".") -> str:
 
 
 def get_commit_context(repo_path: Path | str = ".", commit_ref: str = "HEAD") -> CommitInfo:
-    """Extract metadata for a specific commit.
-
-    Args:
-        repo_path: Repository path.
-        commit_ref: Commit ref (e.g., 'HEAD', SHA, tag).
-
-    Returns:
-        CommitInfo object.
-
-    Raises:
-        GitCommandError: If the commit ref cannot be resolved.
-    """
-    # Format: SHA, short SHA, author name, author email, author date ISO, subject, body, parents
-    # Delimited by null bytes
+    """Extract metadata for a specific commit."""
     fmt = "%H%x00%h%x00%an%x00%ae%x00%aI%x00%s%x00%b%x00%P"
     proc = run_git(["log", "-1", f"--format={fmt}", commit_ref], cwd=repo_path, check=True)
 
@@ -210,24 +169,15 @@ def get_commit_context(repo_path: Path | str = ".", commit_ref: str = "HEAD") ->
     if len(parts) < 8:
         raise GitError(f"Unexpected git log output format for commit {commit_ref}")
 
-    sha = parts[0].strip()
-    short_sha = parts[1].strip()
-    author_name = parts[2].strip()
-    author_email = parts[3].strip()
-    date = parts[4].strip()
-    subject = parts[5].strip()
-    body = parts[6].strip()
-    parents = parts[7].strip().split() if parts[7].strip() else []
-
     return CommitInfo(
-        sha=sha,
-        short_sha=short_sha,
-        author_name=author_name,
-        author_email=author_email,
-        date=date,
-        subject=subject,
-        body=body,
-        parents=parents,
+        sha=parts[0].strip(),
+        short_sha=parts[1].strip(),
+        author_name=parts[2].strip(),
+        author_email=parts[3].strip(),
+        date=parts[4].strip(),
+        subject=parts[5].strip(),
+        body=parts[6].strip(),
+        parents=parts[7].strip().split() if parts[7].strip() else [],
     )
 
 
@@ -235,21 +185,14 @@ def detect_change_scope(repo_path: Path | str = ".") -> ChangeScope:
     """Smartly detect the change scope in the repository.
 
     Evaluation order:
-    1. Check for staged changes (`git diff --staged --name-only`).
-    2. Check for unstaged changes in working tree (`git diff --name-only`).
-    3. Fall back to HEAD commit if repository has commit history.
-    4. Empty state if no commits and no working tree modifications.
-
-    Args:
-        repo_path: Repository path.
-
-    Returns:
-        ChangeScope indicating the type of changes and file lists.
+    1. Staged changes (`git diff --staged --name-only`)
+    2. Unstaged or untracked changes in working tree
+    3. HEAD commit if repository has commit history
+    4. Empty state if clean and no commits exist
     """
     if not is_git_repo(repo_path):
         raise GitError(f"Directory is not a git repository: {repo_path}")
 
-    # Check staged changes
     staged_proc = run_git(["diff", "--staged", "--name-only"], cwd=repo_path)
     staged_files = [f for f in staged_proc.stdout.splitlines() if f.strip()]
 
@@ -260,23 +203,23 @@ def detect_change_scope(repo_path: Path | str = ".") -> ChangeScope:
             staged_files=staged_files,
         )
 
-    # Check unstaged changes
     unstaged_proc = run_git(["diff", "--name-only"], cwd=repo_path)
     unstaged_files = [f for f in unstaged_proc.stdout.splitlines() if f.strip()]
 
-    # Also detect untracked files for comprehensive context
     untracked_proc = run_git(["ls-files", "--others", "--exclude-standard"], cwd=repo_path)
     untracked_files = [f for f in untracked_proc.stdout.splitlines() if f.strip()]
 
     if unstaged_files or untracked_files:
         return ChangeScope(
             scope_type="unstaged",
-            description=f"Unstaged working tree changes ({len(unstaged_files)} modified, {len(untracked_files)} untracked)",
+            description=(
+                f"Unstaged working tree changes ({len(unstaged_files)} modified, "
+                f"{len(untracked_files)} untracked)"
+            ),
             unstaged_files=unstaged_files,
             untracked_files=untracked_files,
         )
 
-    # Check if HEAD exists (repo has at least one commit)
     head_proc = run_git(["rev-parse", "--verify", "HEAD"], cwd=repo_path)
     if head_proc.returncode == 0:
         commit_info = get_commit_context(repo_path, "HEAD")
@@ -299,41 +242,43 @@ def _resolve_target_args(
     staged: bool = False,
     unified_context: int = 3,
 ) -> tuple[list[str], bool]:
-    """Helper to convert target/staged flags into git diff arguments.
-
-    Returns:
-        Tuple of (args_list, is_diff_tree_call)
-    """
+    """Convert target/staged flags into canonical git diff arguments."""
     u_flag = f"-U{unified_context}"
+    prefix_cfg = ["-c", "diff.mnemonicPrefix=false", "-c", "core.quotePath=false"]
 
     if staged or target == "staged":
-        return ["diff", "--staged", u_flag], False
+        return [*prefix_cfg, "diff", "--staged", u_flag], False
 
-    if target is None:
-        # Default unstaged diff
-        return ["diff", u_flag], False
+    if target is None or target == "unstaged":
+        return [*prefix_cfg, "diff", u_flag], False
 
-    # Check for range comparison (e.g., main..feature or commit1...commit2)
     if ".." in target:
-        return ["diff", target, u_flag], False
+        return [*prefix_cfg, "diff", target, u_flag], False
 
-    # Check if target is a single commit or ref
     rev_proc = run_git(["rev-parse", "--verify", f"{target}^{{commit}}"], cwd=repo_path)
     if rev_proc.returncode == 0:
-        # It's a valid commit ref
-        # Check parents
         parents_proc = run_git(["rev-list", "--parents", "-n", "1", target], cwd=repo_path)
         tokens = parents_proc.stdout.strip().split()
         if len(tokens) > 1:
-            # Has at least one parent: diff parent..commit
             parent_sha = tokens[1]
-            return ["diff", parent_sha, target, u_flag], False
-        else:
-            # Root commit (no parent) -> use diff-tree --root
-            return ["diff-tree", "--root", "-p", u_flag, target], True
+            return [*prefix_cfg, "diff", parent_sha, target, u_flag], False
+        return [*prefix_cfg, "diff-tree", "--root", "-p", u_flag, target], True
 
-    # Otherwise fallback to git diff with target (e.g. tree-ish or branch)
-    return ["diff", target, u_flag], False
+    return [*prefix_cfg, "diff", target, u_flag], False
+
+
+def _replace_diff_mode(args: list[str], is_diff_tree: bool, flag: str) -> list[str]:
+    """Swap -p/-U context flags for --stat or --numstat safely despite leading -c flags."""
+    if is_diff_tree:
+        cleaned = [a for a in args if a not in ("-p", "-U0") and not a.startswith("-U")]
+        idx = cleaned.index("diff-tree")
+        cleaned.insert(idx + 2, flag)
+        return cleaned
+
+    cleaned = [a for a in args if not a.startswith("-U")]
+    idx = cleaned.index("diff")
+    cleaned.insert(idx + 1, flag)
+    return cleaned
 
 
 def get_diff(
@@ -343,21 +288,7 @@ def get_diff(
     unified_context: int = 3,
     pathspecs: Sequence[str] | None = None,
 ) -> str:
-    """Extract raw unified diff from repository.
-
-    Supports staged changes, unstaged changes, arbitrary refs (e.g. `main..feature`,
-    `HEAD~1`, commit hash), and root commits.
-
-    Args:
-        repo_path: Repository path.
-        target: Target commit, range, or ref.
-        staged: If True, inspect staged changes.
-        unified_context: Number of context lines (default 3).
-        pathspecs: Optional specific file paths or patterns to diff.
-
-    Returns:
-        Unified diff string.
-    """
+    """Extract raw unified diff from repository."""
     args, _ = _resolve_target_args(repo_path, target=target, staged=staged, unified_context=unified_context)
     if pathspecs:
         args.append("--")
@@ -365,6 +296,65 @@ def get_diff(
 
     proc = run_git(args, cwd=repo_path, check=True)
     return proc.stdout
+
+
+def get_untracked_diffs(
+    repo_path: Path | str,
+    untracked_files: Sequence[str],
+    max_files: int = 20,
+    max_bytes_per_file: int = 100_000,
+) -> str:
+    """Synthesize unified git diff chunks for untracked files in working tree."""
+    if not untracked_files:
+        return ""
+
+    root = Path(repo_path)
+    chunks: list[str] = []
+
+    for rel_path in untracked_files[:max_files]:
+        file_path = root / rel_path
+        if not file_path.is_file():
+            continue
+        try:
+            raw_bytes = file_path.read_bytes()
+        except OSError:
+            continue
+
+        norm_path = rel_path.replace("\\", "/")
+        if b"\x00" in raw_bytes[:8192]:
+            chunks.append(
+                f"diff --git a/{norm_path} b/{norm_path}\n"
+                f"new file mode 100644\n"
+                f"Binary files /dev/null and b/{norm_path} differ\n"
+            )
+            continue
+
+        if len(raw_bytes) > max_bytes_per_file:
+            raw_bytes = raw_bytes[:max_bytes_per_file]
+
+        text = raw_bytes.decode("utf-8", errors="replace")
+        lines = text.splitlines(keepends=True)
+        diff_lines = list(
+            difflib.unified_diff(
+                [],
+                lines,
+                fromfile="/dev/null",
+                tofile=f"b/{norm_path}",
+            )
+        )
+        if not diff_lines:
+            continue
+
+        header = (
+            f"diff --git a/{norm_path} b/{norm_path}\n"
+            f"new file mode 100644\n"
+        )
+        body = "".join(diff_lines)
+        if not body.endswith("\n"):
+            body += "\n"
+        chunks.append(header + body)
+
+    return "".join(chunks)
 
 
 def _parse_numstat_line(line: str) -> FileNumStat | None:
@@ -377,17 +367,10 @@ def _parse_numstat_line(line: str) -> FileNumStat | None:
     if len(parts) < 3:
         return None
 
-    add_str, del_str = parts[0], parts[1]
-    path_part = parts[2]
+    add_str, del_str, path_part = parts[0], parts[1], parts[2]
 
-    # Binary files are marked with '-' for additions and deletions
     if add_str == "-" and del_str == "-":
-        return FileNumStat(
-            path=path_part,
-            additions=0,
-            deletions=0,
-            is_binary=True,
-        )
+        return FileNumStat(path=path_part, additions=0, deletions=0, is_binary=True)
 
     try:
         additions = int(add_str)
@@ -395,7 +378,6 @@ def _parse_numstat_line(line: str) -> FileNumStat | None:
     except ValueError:
         return None
 
-    # Handle rename syntax: {old => new}/path or old => new
     old_path: str | None = None
     path = path_part
     if " => " in path_part:
@@ -424,28 +406,9 @@ def get_numstat(
     staged: bool = False,
     pathspecs: Sequence[str] | None = None,
 ) -> list[FileNumStat]:
-    """Extract file modification statistics (`git diff --numstat`).
-
-    Args:
-        repo_path: Repository path.
-        target: Target commit, range, or ref.
-        staged: If True, inspect staged changes.
-        pathspecs: Optional specific file paths or patterns.
-
-    Returns:
-        List of FileNumStat objects containing additions, deletions, and paths.
-    """
+    """Extract file modification statistics (`git diff --numstat`)."""
     args, is_diff_tree = _resolve_target_args(repo_path, target=target, staged=staged, unified_context=0)
-
-    # Replace diff action with numstat flags
-    if is_diff_tree:
-        # For diff-tree --root -p -U0 target -> diff-tree --root --numstat target
-        args = [a for a in args if a not in ("-p", "-U0")]
-        args.insert(2, "--numstat")
-    else:
-        # For diff -U0 ... -> diff --numstat ...
-        args = [a for a in args if not a.startswith("-U")]
-        args.insert(1, "--numstat")
+    args = _replace_diff_mode(args, is_diff_tree, "--numstat")
 
     if pathspecs:
         args.append("--")
@@ -466,25 +429,9 @@ def get_stat(
     staged: bool = False,
     pathspecs: Sequence[str] | None = None,
 ) -> str:
-    """Extract standard git diff summary (`git diff --stat`).
-
-    Args:
-        repo_path: Repository path.
-        target: Target commit, range, or ref.
-        staged: If True, inspect staged changes.
-        pathspecs: Optional specific file paths or patterns.
-
-    Returns:
-        Raw `--stat` string output from git.
-    """
+    """Extract standard git diff summary (`git diff --stat`)."""
     args, is_diff_tree = _resolve_target_args(repo_path, target=target, staged=staged, unified_context=0)
-
-    if is_diff_tree:
-        args = [a for a in args if a not in ("-p", "-U0")]
-        args.insert(2, "--stat")
-    else:
-        args = [a for a in args if not a.startswith("-U")]
-        args.insert(1, "--stat")
+    args = _replace_diff_mode(args, is_diff_tree, "--stat")
 
     if pathspecs:
         args.append("--")
@@ -492,6 +439,37 @@ def get_stat(
 
     proc = run_git(args, cwd=repo_path, check=True)
     return proc.stdout.strip()
+
+
+def install_prepare_commit_msg_hook(repo_path: Path | str = ".", force: bool = False) -> Path:
+    """Install a `prepare-commit-msg` git hook that pre-populates AI commit messages."""
+    root = get_repo_root(repo_path)
+    proc = run_git(["rev-parse", "--git-path", "hooks/prepare-commit-msg"], cwd=root, check=True)
+    hook_path = Path(proc.stdout.strip())
+    if not hook_path.is_absolute():
+        hook_path = root / hook_path
+
+    if hook_path.exists():
+        existing = hook_path.read_text(encoding="utf-8", errors="replace")
+        if HOOK_MARKER not in existing and not force:
+            raise GitError(
+                f"Existing custom hook found at {hook_path}. Pass --force to overwrite."
+            )
+
+    hook_path.parent.mkdir(parents=True, exist_ok=True)
+    hook_script = (
+        "#!/usr/bin/env sh\n"
+        f"{HOOK_MARKER}\n"
+        'COMMIT_MSG_FILE="$1"\n'
+        'COMMIT_SOURCE="$2"\n'
+        '# Only auto-populate interactive empty commits (skip merge, squash, -m, amend)\n'
+        'if [ -z "$COMMIT_SOURCE" ] && command -v git-narrator >/dev/null 2>&1; then\n'
+        '  git-narrator _prepare-hook "$COMMIT_MSG_FILE" || true\n'
+        "fi\n"
+    )
+    hook_path.write_text(hook_script, encoding="utf-8")
+    hook_path.chmod(0o755)
+    return hook_path
 
 
 class GitEngine:

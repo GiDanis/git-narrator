@@ -8,7 +8,7 @@ import httpx
 from pydantic import BaseModel
 
 from git_narrator.providers.base import BaseLLMProvider, resolve_schema_dict
-from git_narrator.transport import aiter_sse_data
+from git_narrator.transport import TransportError, aiter_sse_data, send_streaming_with_retry
 
 
 class AnthropicProvider(BaseLLMProvider):
@@ -16,10 +16,11 @@ class AnthropicProvider(BaseLLMProvider):
 
     def __init__(
         self,
-        model: str = "claude-3-5-sonnet-20241022",
+        model: str = "claude-haiku-5-5",
         api_key: str | None = None,
         base_url: str | None = "https://api.anthropic.com",
-        max_tokens: int = 4096,
+        max_tokens: int = 8192,
+        temperature: float = 0.1,
         timeout: float = 90.0,
         client: httpx.AsyncClient | None = None,
     ):
@@ -31,6 +32,7 @@ class AnthropicProvider(BaseLLMProvider):
             client=client,
         )
         self.max_tokens = max_tokens
+        self.temperature = temperature
 
     def build_payload(
         self,
@@ -43,6 +45,7 @@ class AnthropicProvider(BaseLLMProvider):
         return {
             "model": self.model,
             "max_tokens": self.max_tokens,
+            "temperature": self.temperature,
             "system": system_prompt,
             "messages": [
                 {"role": "user", "content": user_prompt},
@@ -80,14 +83,13 @@ class AnthropicProvider(BaseLLMProvider):
 
         payload = self.build_payload(system_prompt, user_prompt, target_schema)
 
-        request = self.client.build_request(
-            method="POST",
-            url=endpoint,
+        response = await send_streaming_with_retry(
+            self.client,
+            "POST",
+            endpoint,
             headers=headers,
-            json=payload,
+            json_payload=payload,
         )
-
-        response = await self.client.send(request, stream=True)
         try:
             async for sse_event in aiter_sse_data(response):
                 try:
@@ -96,6 +98,9 @@ class AnthropicProvider(BaseLLMProvider):
                     continue
 
                 event_type = event_data.get("type")
+                if event_type == "error":
+                    msg = event_data.get("error", {}).get("message", "Unknown Anthropic stream error")
+                    raise TransportError(f"Anthropic error: {msg}")
                 if event_type == "content_block_delta":
                     delta = event_data.get("delta", {})
                     delta_type = delta.get("type")

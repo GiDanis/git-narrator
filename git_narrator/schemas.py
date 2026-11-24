@@ -1,12 +1,14 @@
 """Pydantic v2 schemas for git-narrator architectural reports."""
 
-from enum import Enum
+from enum import StrEnum
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-class RiskCategory(str, Enum):
+class RiskCategory(StrEnum):
     """Categorization of negative-space and architectural risks."""
+
     CONTRACT_BREAK = "CONTRACT_BREAK"
     TEST_GAP = "TEST_GAP"
     SECURITY_LEAK = "SECURITY_LEAK"
@@ -15,8 +17,9 @@ class RiskCategory(str, Enum):
     HALLUCINATED_DEPENDENCY = "HALLUCINATED_DEPENDENCY"
 
 
-class RiskSeverity(str, Enum):
+class RiskSeverity(StrEnum):
     """Severity level of identified risks."""
+
     CRITICAL = "CRITICAL"
     HIGH = "HIGH"
     MEDIUM = "MEDIUM"
@@ -24,8 +27,52 @@ class RiskSeverity(str, Enum):
     INFO = "INFO"
 
 
+_CATEGORY_ALIASES: dict[str, RiskCategory] = {
+    "CONTRACT_BREAK": RiskCategory.CONTRACT_BREAK,
+    "BREAKING_CHANGE": RiskCategory.CONTRACT_BREAK,
+    "API_BREAK": RiskCategory.CONTRACT_BREAK,
+    "TEST_GAP": RiskCategory.TEST_GAP,
+    "MISSING_TESTS": RiskCategory.TEST_GAP,
+    "SECURITY_LEAK": RiskCategory.SECURITY_LEAK,
+    "SECURITY": RiskCategory.SECURITY_LEAK,
+    "SECRET_LEAK": RiskCategory.SECURITY_LEAK,
+    "VULNERABILITY": RiskCategory.SECURITY_LEAK,
+    "PERFORMANCE_REGRESSION": RiskCategory.PERFORMANCE_REGRESSION,
+    "PERFORMANCE": RiskCategory.PERFORMANCE_REGRESSION,
+    "PERF": RiskCategory.PERFORMANCE_REGRESSION,
+    "CONCURRENCY_RACE": RiskCategory.CONCURRENCY_RACE,
+    "RACE_CONDITION": RiskCategory.CONCURRENCY_RACE,
+    "CONCURRENCY": RiskCategory.CONCURRENCY_RACE,
+    "HALLUCINATED_DEPENDENCY": RiskCategory.HALLUCINATED_DEPENDENCY,
+    "DEPENDENCY": RiskCategory.HALLUCINATED_DEPENDENCY,
+    "SUPPLY_CHAIN": RiskCategory.HALLUCINATED_DEPENDENCY,
+}
+
+_SEVERITY_ALIASES: dict[str, RiskSeverity] = {
+    "CRITICAL": RiskSeverity.CRITICAL,
+    "CRIT": RiskSeverity.CRITICAL,
+    "HIGH": RiskSeverity.HIGH,
+    "MEDIUM": RiskSeverity.MEDIUM,
+    "MED": RiskSeverity.MEDIUM,
+    "MODERATE": RiskSeverity.MEDIUM,
+    "LOW": RiskSeverity.LOW,
+    "INFO": RiskSeverity.INFO,
+    "INFORMATIONAL": RiskSeverity.INFO,
+}
+
+
+def infer_blast_radius(overall_impact: str, fallback: RiskSeverity = RiskSeverity.MEDIUM) -> RiskSeverity:
+    """Infer structured blast radius severity from impact prose when omitted."""
+    upper = overall_impact.upper()
+    for level in (RiskSeverity.CRITICAL, RiskSeverity.HIGH, RiskSeverity.MEDIUM, RiskSeverity.LOW):
+        if level.value in upper:
+            return level
+    return fallback
+
+
 class RiskRadarItem(BaseModel):
     """Detailed risk assessment item focusing on implicit risks and negative space."""
+
     model_config = ConfigDict(extra="ignore")
 
     category: RiskCategory = Field(
@@ -57,9 +104,32 @@ class RiskRadarItem(BaseModel):
         description="Concrete, actionable recommendations or code changes to eliminate the risk.",
     )
 
+    @field_validator("category", mode="before")
+    @classmethod
+    def _normalize_category(cls, v: Any) -> Any:
+        if isinstance(v, RiskCategory):
+            return v
+        if isinstance(v, str):
+            key = v.strip().upper().replace(" ", "_").replace("-", "_")
+            if key in _CATEGORY_ALIASES:
+                return _CATEGORY_ALIASES[key]
+        return v
+
+    @field_validator("severity", mode="before")
+    @classmethod
+    def _normalize_severity(cls, v: Any) -> Any:
+        if isinstance(v, RiskSeverity):
+            return v
+        if isinstance(v, str):
+            key = v.strip().upper()
+            if key in _SEVERITY_ALIASES:
+                return _SEVERITY_ALIASES[key]
+        return v
+
 
 class ComponentMutation(BaseModel):
     """Architectural mutation observed within a component or module."""
+
     model_config = ConfigDict(extra="ignore")
 
     component_name: str = Field(
@@ -78,6 +148,7 @@ class ComponentMutation(BaseModel):
 
 class VisualFlow(BaseModel):
     """Visual diagram representations of the system change."""
+
     model_config = ConfigDict(extra="ignore")
 
     diagram_type: str = Field(
@@ -96,6 +167,7 @@ class VisualFlow(BaseModel):
 
 class ExecutiveSummary(BaseModel):
     """High-level architectural summary of the changes."""
+
     model_config = ConfigDict(extra="ignore")
 
     headline: str = Field(
@@ -110,14 +182,40 @@ class ExecutiveSummary(BaseModel):
         ...,
         description="Assessment of overall impact on system stability, latency, throughput, and developer ergonomics.",
     )
+    blast_radius: RiskSeverity = Field(
+        default=RiskSeverity.MEDIUM,
+        description="Discrete overall blast radius severity: CRITICAL, HIGH, MEDIUM, or LOW.",
+    )
     tags: list[str] = Field(
         default_factory=list,
         description="Architectural and domain tags (e.g. ['security', 'database', 'auth']).",
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def _populate_blast_radius(cls, data: Any) -> Any:
+        if isinstance(data, dict) and not data.get("blast_radius"):
+            impact = str(data.get("overall_impact", ""))
+            copied = dict(data)
+            copied["blast_radius"] = infer_blast_radius(impact)
+            return copied
+        return data
+
+    @field_validator("blast_radius", mode="before")
+    @classmethod
+    def _normalize_blast_radius(cls, v: Any) -> Any:
+        if isinstance(v, RiskSeverity):
+            return v
+        if isinstance(v, str):
+            key = v.strip().upper()
+            if key in _SEVERITY_ALIASES:
+                return _SEVERITY_ALIASES[key]
+        return RiskSeverity.MEDIUM
+
 
 class ArchitectureNarrative(BaseModel):
     """State transition narrative comparing the system before and after."""
+
     model_config = ConfigDict(extra="ignore")
 
     before_state: str = Field(
@@ -140,6 +238,7 @@ class ArchitectureNarrative(BaseModel):
 
 class ReviewChecklist(BaseModel):
     """Targeted checklist for human code reviewers."""
+
     model_config = ConfigDict(extra="ignore")
 
     manual_checks: list[str] = Field(
@@ -154,6 +253,7 @@ class ReviewChecklist(BaseModel):
 
 class GitNarratorReport(BaseModel):
     """Root model representing the complete architectural report for a git diff."""
+
     model_config = ConfigDict(extra="ignore")
 
     executive_summary: ExecutiveSummary = Field(
@@ -182,6 +282,6 @@ class GitNarratorReport(BaseModel):
     )
 
 
-def get_report_json_schema() -> dict:
+def get_report_json_schema() -> dict[str, Any]:
     """Return JSON schema dict for GitNarratorReport."""
     return GitNarratorReport.model_json_schema()

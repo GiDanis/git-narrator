@@ -2,19 +2,17 @@
 
 from __future__ import annotations
 
-import math
-import re
 from dataclasses import dataclass, field
+import math
 from pathlib import Path
+import re
 
 from git_narrator.sanitizer import split_diff_into_file_chunks
 
-# Regex matching hunk headers: @@ -10,5 +10,8 @@ optional context signature
 HUNK_HEADER_REGEX = re.compile(
     r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?:\s*(.*))?$"
 )
 
-# Signature markers inside hunk headers that indicate code interfaces
 INTERFACE_SIGNATURE_MARKERS = [
     r"\bdef\s+",
     r"\basync\s+def\s+",
@@ -41,35 +39,14 @@ INTERFACE_SIGNATURE_COMPILED = re.compile(
 
 
 def estimate_tokens(text: str) -> int:
-    """Estimate token count for LLMs (gemini/gpt/claude average ~3.7 chars/token).
-
-    Args:
-        text: String content.
-
-    Returns:
-        Estimated token integer.
-    """
+    """Estimate token count for LLMs (~3.7 chars/token)."""
     if not text:
         return 0
     return max(1, math.ceil(len(text) / 3.7))
 
 
 def classify_file_weight(path: str | Path) -> float:
-    """Classify the semantic importance weight $W_{type}$ of a file path.
-
-    Weights:
-    - Core logic / domain / auth / db: 1.00
-    - Infra / config / build specs: 0.85
-    - Tests: 0.50
-    - Styling: 0.25
-    - Docs & non-code text: 0.20
-
-    Args:
-        path: Path or filename.
-
-    Returns:
-        Weight float between 0.15 and 1.0.
-    """
+    """Classify the semantic importance weight W_type of a file path."""
     norm = str(path).replace("\\", "/").lower()
     filename = Path(norm).name
 
@@ -90,9 +67,8 @@ def classify_file_weight(path: str | Path) -> float:
         or ".test." in filename
         or ".spec." in filename
         or "/tests/" in norm
-        or norm.startswith("tests/")
         or "/test/" in norm
-        or norm.startswith("test/")
+        or norm.startswith(("tests/", "test/"))
         or "/spec/" in norm
         or "__tests__" in norm
     ):
@@ -133,21 +109,12 @@ def classify_file_weight(path: str | Path) -> float:
 
 
 def has_interface_signature(hunk_header_line: str) -> bool:
-    """Check if hunk header contains function, class, route, or export signatures.
-
-    Args:
-        hunk_header_line: The raw @@ ... @@ header line.
-
-    Returns:
-        True if interface signature detected, False otherwise.
-    """
+    """Check if hunk header contains function, class, route, or export signatures."""
     match = HUNK_HEADER_REGEX.match(hunk_header_line.strip())
     if not match:
         return False
     context_text = match.group(5)
-    if not context_text:
-        return False
-    return bool(INTERFACE_SIGNATURE_COMPILED.search(context_text))
+    return bool(context_text and INTERFACE_SIGNATURE_COMPILED.search(context_text))
 
 
 def score_hunk(
@@ -156,25 +123,10 @@ def score_hunk(
     w_type: float,
     has_signature: bool = False,
 ) -> float:
-    r"""Compute semantic priority score for a hunk or file.
-
-    Formula:
-    $$S = W_{type} \times (1 + \ln(1 + additions + deletions)) \times C_{interface}$$
-
-    Args:
-        additions: Number of lines added.
-        deletions: Number of lines deleted.
-        w_type: File category weight ($W_{type}$).
-        has_signature: Whether hunk header includes class/function/route signatures.
-
-    Returns:
-        Calculated semantic score.
-    """
+    """Compute semantic priority score: S = W_type * (1 + ln(1 + delta)) * C_interface."""
     c_interface = 1.5 if has_signature else 1.0
     delta = additions + deletions
-    # math.log1p(x) calculates ln(1 + x) accurately
-    score = w_type * (1.0 + math.log1p(delta)) * c_interface
-    return score
+    return w_type * (1.0 + math.log1p(delta)) * c_interface
 
 
 @dataclass
@@ -206,9 +158,7 @@ class DiffHunk:
     def density(self) -> float:
         """Value density: Score per Token."""
         tokens = self.token_count
-        if tokens == 0:
-            return 0.0
-        return self.score / tokens
+        return self.score / tokens if tokens > 0 else 0.0
 
 
 @dataclass
@@ -236,22 +186,11 @@ class DiffFile:
 
 
 def compress_hunk_context(hunk: DiffHunk) -> DiffHunk:
-    """Adaptive context reduction: reduce context lines from -U3 to -U1.
-
-    Leaves at most 1 line of context before the first edit line and after the last
-    edit line, drastically reducing tokens while maintaining human and LLM readability.
-
-    Args:
-        hunk: Original DiffHunk.
-
-    Returns:
-        A new compressed DiffHunk with reduced context lines.
-    """
+    """Reduce leading/trailing context lines (-U3 -> -U1) while updating line numbers."""
     if hunk.is_compressed or not hunk.lines:
         return hunk
 
     lines = hunk.lines
-    # Find first and last change lines
     first_edit_idx: int | None = None
     last_edit_idx: int | None = None
 
@@ -262,30 +201,29 @@ def compress_hunk_context(hunk: DiffHunk) -> DiffHunk:
             last_edit_idx = idx
 
     if first_edit_idx is None or last_edit_idx is None:
-        # No actual edits found in hunk lines
         return hunk
 
-    # Keep at most 1 context line before first edit
     start_idx = max(0, first_edit_idx - 1)
-    # Keep at most 1 context line after last edit
     end_idx = min(len(lines), last_edit_idx + 2)
-
     trimmed_lines = lines[start_idx:end_idx]
 
-    # Recompute header if possible
-    # We can preserve the original header or update counts
-    old_count = sum(1 for line in trimmed_lines if not line.startswith("+"))
-    new_count = sum(1 for line in trimmed_lines if not line.startswith("-"))
+    old_count = sum(1 for line in trimmed_lines if not line.startswith(("+", "\\")))
+    new_count = sum(1 for line in trimmed_lines if not line.startswith(("-", "\\")))
 
     match = HUNK_HEADER_REGEX.match(hunk.header)
     if match:
         old_start_str, _, new_start_str, _, ctx = match.groups()
+        # Lines before start_idx are strictly leading context present in both old and new files
+        skipped_old = sum(1 for line in lines[:start_idx] if not line.startswith(("+", "\\")))
+        skipped_new = sum(1 for line in lines[:start_idx] if not line.startswith(("-", "\\")))
+        new_old_start = int(old_start_str) + skipped_old
+        new_new_start = int(new_start_str) + skipped_new
         ctx_suffix = f" {ctx}" if ctx else ""
-        new_header = f"@@ -{old_start_str},{old_count} +{new_start_str},{new_count} @@{ctx_suffix}"
+        new_header = f"@@ -{new_old_start},{old_count} +{new_new_start},{new_count} @@{ctx_suffix}"
     else:
         new_header = hunk.header
 
-    compressed = DiffHunk(
+    return DiffHunk(
         file_path=hunk.file_path,
         header=new_header,
         lines=trimmed_lines,
@@ -297,73 +235,58 @@ def compress_hunk_context(hunk: DiffHunk) -> DiffHunk:
         is_compressed=True,
         is_included=hunk.is_included,
     )
-    return compressed
+
+
+def _build_diff_hunk(
+    file_path: str,
+    header: str,
+    hunk_lines: list[str],
+    w_type: float,
+) -> DiffHunk:
+    """Construct and score a single DiffHunk without loop-closure capture."""
+    additions = sum(1 for line in hunk_lines if line.startswith("+"))
+    deletions = sum(1 for line in hunk_lines if line.startswith("-"))
+    has_sig = has_interface_signature(header)
+    return DiffHunk(
+        file_path=file_path,
+        header=header,
+        lines=hunk_lines,
+        additions=additions,
+        deletions=deletions,
+        w_type=w_type,
+        has_interface=has_sig,
+        score=score_hunk(additions, deletions, w_type, has_sig),
+    )
 
 
 def parse_diff_files(diff_text: str) -> list[DiffFile]:
-    """Parse raw git diff string into structured DiffFile and DiffHunk instances.
-
-    Args:
-        diff_text: Raw unified diff string.
-
-    Returns:
-        List of DiffFile instances.
-    """
+    """Parse raw git diff string into structured DiffFile and DiffHunk instances."""
     chunks = split_diff_into_file_chunks(diff_text)
     files: list[DiffFile] = []
 
     for chunk in chunks:
         fpath = chunk.file_path
         w_type = classify_file_weight(fpath)
-
-        lines = chunk.raw_chunk.splitlines()
         headers: list[str] = []
         hunks: list[DiffHunk] = []
-
         current_hunk_header: str | None = None
         current_hunk_lines: list[str] = []
 
-        def finish_hunk():
-            nonlocal current_hunk_header, current_hunk_lines
-            if current_hunk_header is not None:
-                additions = sum(1 for l in current_hunk_lines if l.startswith("+"))
-                deletions = sum(1 for l in current_hunk_lines if l.startswith("-"))
-                has_sig = has_interface_signature(current_hunk_header)
-                s = score_hunk(additions, deletions, w_type, has_sig)
-                hunks.append(
-                    DiffHunk(
-                        file_path=fpath,
-                        header=current_hunk_header,
-                        lines=current_hunk_lines,
-                        additions=additions,
-                        deletions=deletions,
-                        w_type=w_type,
-                        has_interface=has_sig,
-                        score=s,
-                    )
-                )
-            current_hunk_header = None
-            current_hunk_lines = []
-
-        for line in lines:
+        for line in chunk.raw_chunk.splitlines():
             if line.startswith("@@"):
-                finish_hunk()
+                if current_hunk_header is not None:
+                    hunks.append(_build_diff_hunk(fpath, current_hunk_header, current_hunk_lines, w_type))
                 current_hunk_header = line
+                current_hunk_lines = []
             elif current_hunk_header is None:
                 headers.append(line)
             else:
                 current_hunk_lines.append(line)
 
-        finish_hunk()
+        if current_hunk_header is not None:
+            hunks.append(_build_diff_hunk(fpath, current_hunk_header, current_hunk_lines, w_type))
 
-        files.append(
-            DiffFile(
-                path=fpath,
-                headers=headers,
-                hunks=hunks,
-                w_type=w_type,
-            )
-        )
+        files.append(DiffFile(path=fpath, headers=headers, hunks=hunks, w_type=w_type))
 
     return files
 
@@ -383,29 +306,13 @@ class KnapsackResult:
 
 
 class KnapsackBudgetOptimizer:
-    """Greedy knapsack budget allocator with adaptive context reduction."""
+    """Greedy knapsack budget allocator with per-file header accounting and -U1 reduction."""
 
     def __init__(self, token_budget: int = 16000):
         self.token_budget = token_budget
 
     def optimize(self, diff_text: str) -> KnapsackResult:
-        r"""Fit highest value-density hunks into token budget.
-
-        Steps:
-        1. Parse diff into files and hunks.
-        2. Reserve token budget for required file headers.
-        3. Score each hunk using $S = W_{type} \times (1 + \ln(1 + \Delta)) \times C_{interface}$.
-        4. Sort hunks by value density ($Score / Tokens$) descending.
-        5. Greedily pack hunks into budget.
-           If a hunk exceeds remaining budget, attempt adaptive context compression (-U1).
-        6. Format final diff with clean truncation markers where hunks were omitted.
-
-        Args:
-            diff_text: Sanitized git diff.
-
-        Returns:
-            KnapsackResult containing optimized diff and token analytics.
-        """
+        """Fit highest value-density hunks into token_budget including file headers."""
         if not diff_text or not diff_text.strip():
             return KnapsackResult(
                 optimized_diff="",
@@ -418,11 +325,11 @@ class KnapsackBudgetOptimizer:
             )
 
         files = parse_diff_files(diff_text)
-        all_hunks: list[DiffHunk] = []
-        for f in files:
-            all_hunks.extend(f.hunks)
+        all_hunks_with_file: list[tuple[DiffFile, DiffHunk]] = [
+            (f, h) for f in files for h in f.hunks
+        ]
 
-        total_hunks_count = len(all_hunks)
+        total_hunks_count = len(all_hunks_with_file)
         if total_hunks_count == 0:
             return KnapsackResult(
                 optimized_diff=diff_text,
@@ -434,10 +341,8 @@ class KnapsackBudgetOptimizer:
                 compressed_hunks=0,
             )
 
-        # Estimate uncompressed full size
         raw_tokens = estimate_tokens(diff_text)
         if raw_tokens <= self.token_budget:
-            # Everything fits comfortably within budget!
             return KnapsackResult(
                 optimized_diff=diff_text,
                 total_tokens=raw_tokens,
@@ -448,41 +353,42 @@ class KnapsackBudgetOptimizer:
                 compressed_hunks=0,
             )
 
-        # Reserve minimal tokens for headers (~150 tokens)
-        reserved_overhead = 150
-        effective_budget = max(200, self.token_budget - reserved_overhead)
+        # Reserve small per-omitted-file marker allowance
+        marker_reserve = min(len(files) * 18, max(50, self.token_budget // 10))
+        effective_budget = max(120, self.token_budget - marker_reserve)
 
-        # Sort hunks by value density descending
-        # Ties broken by higher raw score, then additions
-        sorted_hunks = sorted(
-            all_hunks,
-            key=lambda h: (h.density, h.score, h.additions),
+        sorted_pairs = sorted(
+            all_hunks_with_file,
+            key=lambda pair: (pair[1].density, pair[1].score, pair[1].additions),
             reverse=True,
         )
 
         selected_hunks: set[int] = set()
         compressed_map: dict[int, DiffHunk] = {}
+        paid_headers: set[int] = set()
         used_tokens = 0
         compressed_count = 0
 
-        for hunk in sorted_hunks:
+        for diff_file, hunk in sorted_pairs:
             h_id = id(hunk)
+            f_id = id(diff_file)
+            header_cost = 0 if f_id in paid_headers else diff_file.header_tokens
             h_tokens = hunk.token_count
 
-            if used_tokens + h_tokens <= effective_budget:
+            if used_tokens + header_cost + h_tokens <= effective_budget:
                 selected_hunks.add(h_id)
-                used_tokens += h_tokens
+                paid_headers.add(f_id)
+                used_tokens += header_cost + h_tokens
             else:
-                # Try adaptive compression (-U1)
                 comp = compress_hunk_context(hunk)
                 comp_tokens = comp.token_count
-                if used_tokens + comp_tokens <= effective_budget:
+                if used_tokens + header_cost + comp_tokens <= effective_budget:
                     selected_hunks.add(h_id)
+                    paid_headers.add(f_id)
                     compressed_map[h_id] = comp
-                    used_tokens += comp_tokens
+                    used_tokens += header_cost + comp_tokens
                     compressed_count += 1
 
-        # Reconstruct output diff
         output_chunks: list[str] = []
         included_count = 0
         omitted_count = 0
@@ -503,25 +409,22 @@ class KnapsackBudgetOptimizer:
                     omitted_count += 1
 
             if f_included_hunks:
-                # Add file header
                 output_chunks.append(f.header_text)
                 output_chunks.extend(f_included_hunks)
                 if f_omitted_count > 0:
-                    marker = f"[... {f_omitted_count} hunk(s) omitted in {f.path} - minor changes ...]\n"
-                    output_chunks.append(marker)
+                    output_chunks.append(
+                        f"[... {f_omitted_count} hunk(s) omitted in {f.path} - minor changes ...]\n"
+                    )
             elif f_omitted_count > 0:
-                # All hunks omitted for this file
                 omitted_files.append(f.path)
-                output_chunks.append(f.header_text)
-                marker = f"[... All {f_omitted_count} hunk(s) omitted in {f.path} - minor changes ...]\n"
-                output_chunks.append(marker)
+                output_chunks.append(
+                    f"[... All {f_omitted_count} hunk(s) omitted in {f.path} - minor changes ...]\n"
+                )
 
         optimized_diff = "".join(output_chunks)
-        final_tokens = estimate_tokens(optimized_diff)
-
         return KnapsackResult(
             optimized_diff=optimized_diff,
-            total_tokens=final_tokens,
+            total_tokens=estimate_tokens(optimized_diff),
             token_budget=self.token_budget,
             total_hunks=total_hunks_count,
             included_hunks=included_count,
@@ -533,5 +436,4 @@ class KnapsackBudgetOptimizer:
 
 def optimize_diff_tokens(diff_text: str, token_budget: int = 16000) -> KnapsackResult:
     """Convenience function: apply greedy knapsack token budgeting to a diff."""
-    optimizer = KnapsackBudgetOptimizer(token_budget=token_budget)
-    return optimizer.optimize(diff_text)
+    return KnapsackBudgetOptimizer(token_budget=token_budget).optimize(diff_text)
